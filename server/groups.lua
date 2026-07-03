@@ -24,11 +24,24 @@ end
 
 function Groups.GetGroupId(src) return Groups.bySrc[src] end
 
+--- A pending invite for this player, if any is still live (else nil).
+function Groups.PendingInvite(src)
+    local inv = Groups.invites[src]
+    if not inv then return nil end
+    if os.time() > inv.expires then Groups.invites[src] = nil; return nil end
+    if not Groups.groups[inv.groupId] then Groups.invites[src] = nil; return nil end
+    return { from = inv.from, expiresIn = inv.expires - os.time() }
+end
+
 function Groups.GetPayload(src, session)
     local groupId = Groups.bySrc[src]
-    if not groupId then return { inGroup = false } end
+    if not groupId then
+        -- not in a crew: surface any pending invite so the Crew tab can offer
+        -- Accept/Decline even if the app was closed when the invite arrived
+        return { inGroup = false, invite = Groups.PendingInvite(src) }
+    end
     local g = Groups.groups[groupId]
-    if not g then return { inGroup = false } end
+    if not g then return { inGroup = false, invite = Groups.PendingInvite(src) } end
 
     local members = {}
     for member in pairs(g.members) do
@@ -38,10 +51,25 @@ function Groups.GetPayload(src, session)
             name = ms and ms.name or GetPlayerName(member) or ('Player ' .. member),
             level = ms and ms.profile.level or 1,
             isLeader = member == g.leader,
+            isHacker = member == g.hacker,   -- the crew's designated tracker-breaker
         }
     end
     table.sort(members, function(a, b) return a.isLeader and not b.isLeader end)
-    return { inGroup = true, id = groupId, isLeader = g.leader == src, members = members }
+    return {
+        inGroup = true, id = groupId,
+        isLeader = g.leader == src,
+        isHacker = g.hacker == src,
+        hacker = g.hacker,       -- nil => only the leader can disable trackers
+        members = members,
+    }
+end
+
+--- Who in a crew may disable the GPS tracker: the leader, or the assigned hacker.
+--- (Solo boosters are handled directly in contracts.lua.)
+function Groups.CanDisableTracker(src, groupId)
+    local g = Groups.groups[groupId]
+    if not g then return false end
+    return src == g.leader or (g.hacker ~= nil and src == g.hacker)
 end
 
 local function broadcastUpdate(groupId)
@@ -71,8 +99,9 @@ RegisterCallback('group:invite', function(src, session, data)
     if not target or not GetPlayerName(target) or target == src then return { error = 'player_not_found' } end
     if Groups.bySrc[target] then return { error = 'target_busy' } end
 
-    Groups.invites[target] = { groupId = groupId, from = session.name, expires = os.time() + 60 }
-    notify(target, ('%s invited you to their boosting crew.'):format(session.name), 'inform')
+    Groups.invites[target] = { groupId = groupId, from = session.name,
+        expires = os.time() + (Config.Groups.inviteExpiry or 180) }
+    notify(target, ('%s invited you to their crew — open Boosting > Crew to accept (or /crewaccept).'):format(session.name), 'inform')
     TriggerClientEvent('boosting:groupInvite', target, { from = session.name, groupId = groupId })
     return { ok = true }
 end)
@@ -102,6 +131,26 @@ end)
 
 RegisterCallback('group:leave', function(src, session)
     Groups.Remove(src)
+    return { ok = true }
+end)
+
+--- Leader assigns (or clears) the crew's Hacker — the member who, alongside
+--- the leader, is allowed to disable GPS trackers. target = member src, or
+--- false/nil to clear back to leader-only.
+RegisterCallback('group:setHacker', function(src, session, data)
+    local groupId = Groups.bySrc[src]
+    if not groupId then return { error = 'not_in_group' } end
+    local g = Groups.groups[groupId]
+    if g.leader ~= src then return { error = 'not_leader' } end
+
+    if data.target == false or data.target == nil then
+        g.hacker = nil
+    else
+        local target = tonumber(data.target)
+        if not target or not g.members[target] then return { error = 'player_not_found' } end
+        g.hacker = target
+    end
+    broadcastUpdate(groupId)
     return { ok = true }
 end)
 

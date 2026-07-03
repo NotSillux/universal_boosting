@@ -114,12 +114,51 @@ Everything is in one heavily-commented file:
 | `Config.Progression` | XP curve, max level, hacker/driver XP per level |
 | `Config.Tiers` (D → S+) | vehicles, base reward, XP split, hack game + difficulty, police stars, level gate, spawn weight |
 | `Config.Contract` | spawn points, clean delivery drop-offs, secret VIN garages, VIN reward multiplier, queue timing |
+| `Config.Tracker` | GPS tracker (see below): time to disable, per-tier enable, minigame, escalation, fail cooldown |
 | `Config.Police` | min cops online, dispatch alert, escape rules (lose stars / distance), applied wanted level |
 | `Config.Dispatch` | hook for your dispatch system (ps-dispatch, cd_dispatch, …) |
-| `Config.Groups` | crew size, reward split (`equal`/`leader`), XP sharing |
+| `Config.Groups` | crew size, reward split (`equal`/`leader`), XP sharing, invite expiry |
 | `Config.Auction` | duration, min bid, listing fee, max listings |
 | `Config.Leaderboard` | top N, weekly reset day |
 | `Config.Admin` | command name + ACE permission |
+
+### GPS Tracker (mandatory disable step)
+
+Every stolen vehicle is fitted with a **GPS tracker** the moment it's boosted:
+
+- Its **live position is broadcast** on the map to the booster's crew *and*
+  every on-duty officer (a flashing 📡 blip that follows the car in real time).
+- Disabling it is **mandatory** — you can't deliver or VIN-scratch while it's
+  live (`Config.Tracker.blockDelivery`). Disabling triggers a hacking minigame
+  (the same one the laptop Terminal uses, via the shared `StartHacking` export).
+- **Crew rule:** solo boosters disable it themselves. In a crew, only the
+  **leader** or the member the leader assigns as **Hacker** (Crew tab → *Make
+  hacker*) sees the *Disable GPS Tracker* button; everyone else is told
+  *"Only the crew hacker/leader can disable the GPS tracker."*
+- **Escalation:** if the tracker isn't killed within `Config.Tracker.disableTime`
+  seconds, the booster's wanted level is forced up and police get re-alerted to
+  the live position every `escalation.alertInterval` seconds until it's down.
+
+Config lives in `Config.Tracker`:
+
+| Key | Meaning |
+|---|---|
+| `enabled` | master switch for the whole tracker system |
+| `disableTime` | seconds to disable before the police response escalates |
+| `perTier` | enable/disable the tracker per contract tier (D → S+) |
+| `minigame` / `difficulty` | which hack minigame the disable uses |
+| `updateInterval` | how often the live position is broadcast |
+| `failCooldown` | wait time after a failed disable attempt |
+| `blockDelivery` | block delivery / VIN until the tracker is disabled |
+| `escalation.wantedLevel` / `escalation.alertInterval` | how hard it escalates |
+| `blip` | sprite / colour / scale of the moving tracker blip |
+
+Server events you can hook:
+```lua
+-- fired to any resource when a tracker is disabled / times out, if you want
+-- to drive your own dispatch or scoring off it (optional):
+-- (the built-in police alert + wanted level already work with zero deps)
+```
 
 ### Keeping a VIN-scratched car
 

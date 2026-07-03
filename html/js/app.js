@@ -194,6 +194,40 @@ const Boost = (() => {
         const card = el('div', 'card');
         card.append(hero, steps);
 
+        // ── GPS tracker status ───────────────────────────────────────────────
+        const tr = c.tracker;
+        if (tr && tr.required) {
+            const box = el('div', 'tracker-box ' + (tr.disabled ? 'is-off' : (tr.escalated ? 'is-hot' : 'is-on')));
+            const head = el('div', 'tracker-head');
+            head.append(
+                el('span', 'tk-icon', '📡'),
+                el('span', 'tk-title', 'GPS Tracker'),
+                el('span', 'tk-status', tr.disabled ? 'DISABLED' : (tr.escalated ? 'TRACED!' : 'ACTIVE')));
+            box.appendChild(head);
+
+            if (!tr.disabled) {
+                // countdown bar toward escalation
+                const pct = Math.max(0, Math.min(100, (tr.remaining / Math.max(1, tr.disableTime)) * 100));
+                const bar = el('div', 'tk-bar'); const fill = el('div'); fill.style.width = pct + '%';
+                bar.appendChild(fill); box.appendChild(bar);
+                box.appendChild(el('div', 'muted', tr.escalated
+                    ? 'The signal is live and police are converging. Disable it now!'
+                    : `Disable within ${tr.remaining}s or the police response spikes.`));
+
+                if (tr.canDisable) {
+                    const disable = el('button', 'btn primary wide', '📡 Disable GPS Tracker');
+                    disable.style.marginTop = '10px';
+                    disable.onclick = () => post('disableTracker');
+                    box.appendChild(disable);
+                } else {
+                    box.appendChild(el('div', 'tk-note', '🔒 Only the crew hacker/leader can disable the GPS tracker.'));
+                }
+            } else {
+                box.appendChild(el('div', 'muted', 'Tracker offline — you\'re clear to deliver or scratch the VIN.'));
+            }
+            card.appendChild(box);
+        }
+
         const actions = el('div', 'row');
         if (c.state === 'assigned') {
             const start = el('button', 'btn primary', '▶ Start contract');
@@ -223,6 +257,28 @@ const Boost = (() => {
     // Crew
     function viewCrew(view) {
         const g = S.boot.group;
+
+        // pending invite banner — shown whether or not the app was open when it
+        // arrived (the invite lives on the server until it expires)
+        if (g && !g.inGroup && g.invite) {
+            const inviteCard = el('div', 'card invite-card');
+            inviteCard.appendChild(el('h3', '', '📨 Crew invitation'));
+            inviteCard.appendChild(el('div', 'muted',
+                `${g.invite.from} invited you to their crew. Accept to queue and split payouts together.`));
+            const row = el('div', 'invite-actions');
+            const accept = el('button', 'btn primary', 'Accept');
+            accept.onclick = async () => {
+                const r = await api('group:accept');
+                if (r.error) return toast('Crew', errMsg(r.error));
+                S.tab = 'crew'; refresh();
+            };
+            const decline = el('button', 'btn danger', 'Decline');
+            decline.onclick = async () => { await api('group:decline'); refresh(); };
+            row.append(accept, decline);
+            inviteCard.appendChild(row);
+            view.appendChild(inviteCard);
+        }
+
         if (!g || !g.inGroup) {
             const card = el('div', 'card');
             card.appendChild(el('h3', '', 'Crew'));
@@ -237,19 +293,32 @@ const Boost = (() => {
 
         const card = el('div', 'card');
         card.appendChild(el('h3', '', `Your Crew (${g.members.length}/${S.boot.config.maxGroupSize})`));
+        card.appendChild(el('div', 'muted', 'The leader ♛ and the designated hacker 📡 can disable GPS trackers during a job.'));
         for (const m of g.members) {
             const row = el('div', 'member');
             row.appendChild(el('div', 'av', (m.name || '?').charAt(0).toUpperCase()));
             const info = el('div');
             const nm = el('div', 'm-name'); nm.textContent = m.name;
-            if (m.isLeader) { const c = el('span', 'crown', ' ♛'); nm.appendChild(c); }
-            info.append(nm, el('div', 'm-sub', `Boost level ${m.level}`));
+            if (m.isLeader) nm.appendChild(el('span', 'crown', ' ♛'));
+            if (m.isHacker) nm.appendChild(el('span', 'hacker-badge', ' 📡'));
+            info.append(nm, el('div', 'm-sub', `Boost level ${m.level}` + (m.isHacker ? ' · Hacker' : '')));
             row.appendChild(info);
+
+            const rowActions = el('div', 'm-actions');
+            // leader can promote/demote the hacker role (not on the leader —
+            // the leader can always disable the tracker anyway)
             if (g.isLeader && !m.isLeader) {
-                const kick = el('button', 'btn danger', 'Kick'); kick.style.marginLeft = 'auto';
+                const setH = el('button', 'btn ghost sm', m.isHacker ? 'Unset hacker' : 'Make hacker');
+                setH.onclick = async () => {
+                    await api('group:setHacker', { target: m.isHacker ? false : m.src });
+                    refresh();
+                };
+                const kick = el('button', 'btn danger sm', 'Kick');
                 kick.onclick = async () => { await api('group:kick', { target: m.src }); refresh(); };
-                row.appendChild(kick);
+                rowActions.append(setH, kick);
             }
+            rowActions.style.marginLeft = 'auto';
+            row.appendChild(rowActions);
             card.appendChild(row);
         }
         view.appendChild(card);
@@ -434,6 +503,10 @@ const Boost = (() => {
         auction_over: 'That auction has ended.',
         no_listable_contract: 'No un-started contract to list.',
         too_many_listings: 'You have too many active listings.',
+        tracker_active: 'Disable the GPS tracker before you can finish the job.',
+        not_hacker: 'Only the crew hacker/leader can disable the GPS tracker.',
+        on_cooldown: 'Tracker breach on cooldown — try again shortly.',
+        no_tracker: 'No active tracker to disable.',
         nui_error: 'Connection error.',
     };
     const errMsg = (e) => ERR[e] || (e ? e.replace(/_/g, ' ') : 'Error');

@@ -17,7 +17,32 @@ local world = {
     phase = nil,       -- 'goto' | 'stolen' | 'escaped'
     theftCoords = nil,
     loop = false,
+    tracking = false,  -- driver is broadcasting the tracked vehicle's position
 }
+
+-- ── GPS tracker position broadcast (driver side) ────────────────────────────
+-- The server tells the driver (contract owner) to start pinging when the car
+-- is stolen; we send the live vehicle position until the tracker is disabled,
+-- the contract ends, or the car is destroyed.
+
+function BClient.StartTrackerPing(intervalSec)
+    if world.tracking then return end
+    world.tracking = true
+    local interval = (intervalSec or 3) * 1000
+    CreateThread(function()
+        while world.tracking do
+            if world.veh and DoesEntityExist(world.veh) then
+                local c = GetEntityCoords(world.veh)
+                TriggerServerEvent('boosting:trackerPing', { x = c.x, y = c.y, z = c.z })
+            end
+            Wait(interval)
+        end
+    end)
+end
+
+function BClient.StopTrackerPing()
+    world.tracking = false
+end
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -48,7 +73,8 @@ local function clearBlips()
     world.dropBlips = {}
 end
 
---- Run a minigame, reusing the laptop's if available.
+--- Run a minigame, reusing the laptop's if available. Exposed on BClient so
+--- the GPS-tracker disable (client/main.lua) can share the exact same system.
 local function runMinigame(game, difficulty)
     if GetResourceState(Config.LaptopResource) == 'started' then
         local ok, res = pcall(function()
@@ -58,6 +84,7 @@ local function runMinigame(game, difficulty)
     end
     return FallbackSkillCheck(difficulty)
 end
+BClient.RunMinigame = runMinigame
 
 -- ── Public entry points (called from client/main.lua) ───────────────────────
 
@@ -111,6 +138,7 @@ end
 function BClient.EndWorldPhase(reason)
     world.loop = false
     world.phase = nil
+    world.tracking = false   -- stop the tracker position broadcast
     clearBlips()
     if world.veh and DoesEntityExist(world.veh) then
         -- keep the car for VIN scratch; delete on clean delivery / abandon

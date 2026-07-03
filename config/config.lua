@@ -152,22 +152,79 @@ Config.Contract = {
 }
 
 -- ═══════════════════════════════════════════════════════════════════════════
+--  GPS TRACKER
+--  Every stolen vehicle gets a GPS tracker that broadcasts its live position to
+--  the booster, their crew AND on-duty police. Disabling it is a MANDATORY step
+--  (delivery / VIN scratch are blocked while it is still active). If it isn't
+--  disabled in time, the police response escalates hard.
+--
+--  Crew rule: solo boosters disable it themselves; in a crew ONLY the leader or
+--  the member assigned as "Hacker" gets the disable action.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+Config.Tracker = {
+    enabled        = true,     -- master switch for the whole tracker system
+    disableTime    = 120,      -- seconds to disable before police escalation kicks in
+    minigame       = 'timing', -- 'timing' | 'memory' — reuses the laptop's hack minigame
+    difficulty     = 2,        -- 1..3
+    updateInterval = 3,        -- seconds between live position broadcasts
+    failCooldown   = 8,        -- seconds you must wait after a failed disable attempt
+    blockDelivery  = true,     -- can't deliver / VIN-scratch until the tracker is down
+
+    -- Whether a tracker is attached per contract tier (set false to exempt a tier)
+    perTier = {
+        ['D'] = true, ['C'] = true, ['B'] = true,
+        ['A'] = true, ['S'] = true, ['S+'] = true,
+    },
+
+    -- What happens if the timer runs out before the tracker is disabled
+    escalation = {
+        wantedLevel   = 5,   -- force the booster's wanted level to this
+        alertInterval = 25,  -- re-alert police every N seconds while it stays active
+    },
+
+    -- The moving map blip cops & crew see for the tracked vehicle
+    blip = { sprite = 326, colour = 5, scale = 1.0 },
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
 --  POLICE / RISK
 -- ═══════════════════════════════════════════════════════════════════════════
 
 Config.Police = {
     minRequired      = 0,     -- minimum cops online to run contracts (0 = no gate)
     countJobs        = { 'police', 'sheriff', 'bcso' },
-    alertOnSteal     = true,  -- fire a dispatch alert when a car is boosted
+    alertOnSteal     = true,  -- fire an alert when a car is boosted
     escapeLoseStars  = true,  -- player must lose wanted level to reach "escaped"
     escapeDistance   = 350.0, -- OR be this far from the theft point to count as escaped
     heatWantedStars  = true,  -- apply Config.Tiers[tier].police stars on steal
+
+    -- Built-in police alert (works with NO dispatch resource): sends a map blip
+    -- + notification to every on-duty player whose job is in countJobs. Turn OFF
+    -- if you wire a real dispatch system in Config.Dispatch below.
+    builtinAlert     = true,
+    alertBlipSprite  = 225,    -- car icon
+    alertBlipColour  = 1,      -- red
+    alertBlipTime    = 60,     -- seconds the blip/alert stays on the cops' map
+    alertRadius      = 120.0,  -- blip radius circle (metres)
 }
 
--- If you use a custom dispatch (ps-dispatch, cd_dispatch, etc.), wire it here.
--- Runs server-side when a vehicle is stolen. src = booster, coords = theft loc.
+-- Custom dispatch hook. Runs server-side when a vehicle is stolen IN ADDITION
+-- to the built-in alert above. Wire your dispatch resource here, and set
+-- Config.Police.builtinAlert = false so cops don't get two alerts.
+--   src = booster source, coords = theft location, tierLabel = e.g. 'B-Class'
 Config.Dispatch = function(src, coords, tierLabel)
-    -- example: exports['ps-dispatch']:VehicleTheftAlert(src, coords)
+    -- ── examples (uncomment the one you use) ──────────────────────────────
+    -- ps-dispatch:
+    --   local ped = GetPlayerPed(src)
+    --   exports['ps-dispatch']:VehicleTheft(ped)
+    -- cd_dispatch:
+    --   local info = { dispatchcode = '10-72', message = ('%s Vehicle Theft'):format(tierLabel),
+    --                  origin = { x = coords.x, y = coords.y, z = coords.z } }
+    --   TriggerEvent('cd_dispatch:AddNotification', info)
+    -- core_dispatch:
+    --   exports.core_dispatch:addCall('10-72', 'Grand Theft Auto',
+    --     {{icon='fa-car', info=tierLabel}}, {coords.x,coords.y,coords.z}, 'CRIMINAL', 'car_theft', 45000, 'blip_name')
     if Config.Debug then
         print(('[boosting] dispatch: %s boosting a %s'):format(GetPlayerName(src) or src, tierLabel))
     end
@@ -245,6 +302,7 @@ Config.Groups = {
     rewardSplit    = 'equal',  -- 'equal' | 'leader' (leader takes all, splits manually)
     shareXp        = true,     -- crew members all gain XP on completion
     memberRewardMult = 0.6,    -- non-driver members get this fraction of the reward each
+    inviteExpiry   = 180,      -- seconds a crew invite stays acceptable
 }
 
 -- ═══════════════════════════════════════════════════════════════════════════

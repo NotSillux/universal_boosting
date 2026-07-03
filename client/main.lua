@@ -102,6 +102,39 @@ RegisterNUICallback('startContract', function(_, cb)
     end
 end)
 
+-- close the current UI (shared by the tracker-disable + start flows)
+local function closeUiForWorld()
+    if BClient.standalone then
+        SetNuiFocus(false, false)
+        BClient.standalone = false
+    elseif GetResourceState(LAPTOP) == 'started' then
+        pcall(function() exports[LAPTOP]:Close() end)
+    end
+end
+
+-- Disable the GPS tracker. The button is only shown to eligible players, but
+-- the SERVER re-checks eligibility — this just runs the minigame and reports.
+RegisterNUICallback('disableTracker', function(_, cb)
+    cb({ ok = true })
+    closeUiForWorld()  -- release NUI focus so the minigame overlay works
+
+    Bridge.Framework.client.Notify('Breaching the GPS tracker…', 'inform')
+    local success = BClient.RunMinigame(Config.Tracker.minigame, Config.Tracker.difficulty)
+    local r = ServerCallback('tracker:disable', { success = success })
+
+    if r and r.disabled then
+        Bridge.Framework.client.Notify('GPS tracker disabled — you\'re off the grid.', 'success')
+    elseif r and r.failed then
+        Bridge.Framework.client.Notify(('Breach failed — wait %ds and try again.'):format(Config.Tracker.failCooldown or 8), 'error')
+    elseif r and r.error == 'on_cooldown' then
+        Bridge.Framework.client.Notify('Tracker rejected the breach — cooling down.', 'error')
+    elseif r and r.error == 'not_hacker' then
+        Bridge.Framework.client.Notify('Only the crew hacker/leader can disable the GPS tracker.', 'error')
+    elseif r and r.error then
+        Bridge.Framework.client.Notify('Tracker breach failed.', 'error')
+    end
+end)
+
 -- ── Standalone open (/boosting) ─────────────────────────────────────────────
 
 local function openStandalone()
@@ -113,6 +146,22 @@ end
 if Config.Command then
     RegisterCommand(Config.Command, function() openStandalone() end, false)
 end
+
+-- Accept/decline a crew invite without opening the app (handy when invited
+-- mid-activity). The server rejects these if there's no live invite.
+RegisterCommand('crewaccept', function()
+    local r = ServerCallback('group:accept', {})
+    if r and r.ok then
+        Bridge.Framework.client.Notify('You joined the crew.', 'success')
+    else
+        Bridge.Framework.client.Notify('No pending crew invite.', 'error')
+    end
+end, false)
+
+RegisterCommand('crewdecline', function()
+    ServerCallback('group:decline', {})
+    Bridge.Framework.client.Notify('Crew invite declined.', 'inform')
+end, false)
 
 -- ── Notifications & server-pushed events ────────────────────────────────────
 
@@ -149,6 +198,84 @@ RegisterNetEvent('boosting:applyHeat', function(stars)
     local pid = PlayerId()
     SetPlayerWantedLevel(pid, math.min(5, stars or 0), false)
     SetPlayerWantedLevelNow(pid, false)
+end)
+
+-- ── GPS TRACKER (client) ────────────────────────────────────────────────────
+-- Police + crew get a live map blip that follows the tracked vehicle. The
+-- driver runs a loop that broadcasts the vehicle's position to the server,
+-- which relays it here as boosting:trackerUpdate.
+
+local trackerBlips = {}   -- [contractId] = blip handle
+
+RegisterNetEvent('boosting:trackerStart', function(a)
+    if trackerBlips[a.id] then RemoveBlip(trackerBlips[a.id]) end
+    local blip = AddBlipForCoord(a.x + 0.0, a.y + 0.0, a.z + 0.0)
+    SetBlipSprite(blip, a.sprite or 326)
+    SetBlipColour(blip, a.colour or 5)
+    SetBlipScale(blip, a.scale or 1.0)
+    SetBlipFlashes(blip, true)
+    SetBlipCategory(blip, 7)
+    SetBlipAsShortRange(blip, false)
+    BeginTextCommandSetBlipName('STRING')
+    AddTextComponentSubstringPlayerName(('📡 %s'):format(a.label or 'Tracked vehicle'))
+    EndTextCommandSetBlipName(blip)
+    trackerBlips[a.id] = blip
+    Bridge.Framework.client.Notify('📡 GPS tracker signal acquired.', 'inform')
+end)
+
+RegisterNetEvent('boosting:trackerUpdate', function(u)
+    local blip = trackerBlips[u.id]
+    if blip and DoesBlipExist(blip) then
+        SetBlipCoords(blip, u.x, u.y, u.z)
+    end
+end)
+
+RegisterNetEvent('boosting:trackerStop', function(u)
+    local blip = trackerBlips[u.id]
+    if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
+    trackerBlips[u.id] = nil
+    if BClient.StopTrackerPing then BClient.StopTrackerPing() end  -- driver stops broadcasting
+end)
+
+-- The driver broadcasts the tracked vehicle's live position on an interval.
+-- The loop lives in contract.lua where the world vehicle handle is kept.
+RegisterNetEvent('boosting:trackerOwner', function(info)
+    if BClient.StartTrackerPing then
+        BClient.StartTrackerPing(info and info.interval or 3)
+    end
+end)
+
+-- built-in police alert (only on-duty cops receive this from the server): a
+-- flashing radius blip + area blip that auto-removes after alertBlipTime.
+RegisterNetEvent('boosting:policeAlert', function(a)
+    Bridge.Framework.client.Notify(
+        ('🚨 %s%s'):format(a.label or 'Vehicle theft', a.plate and (' — plate '..a.plate) or ''), 'error')
+
+    local coords = vec3(a.x, a.y, a.z)
+
+    -- pulsing area circle
+    local radiusBlip = AddBlipForRadius(coords.x, coords.y, coords.z, a.radius or 120.0)
+    SetBlipColour(radiusBlip, a.colour or 1)
+    SetBlipAlpha(radiusBlip, 128)
+    SetBlipHiddenOnLegend(radiusBlip, true)
+
+    -- icon blip with flash
+    local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
+    SetBlipSprite(blip, a.sprite or 225)
+    SetBlipColour(blip, a.colour or 1)
+    SetBlipScale(blip, 1.1)
+    SetBlipFlashes(blip, true)
+    SetBlipAsShortRange(blip, false)
+    BeginTextCommandSetBlipName('STRING')
+    AddTextComponentSubstringPlayerName(a.label or 'Vehicle theft')
+    EndTextCommandSetBlipName(blip)
+
+    PlaySoundFrontend(-1, 'Lose_1st', 'GTAO_FM_Events_Soundset', true)
+
+    SetTimeout((a.time or 60) * 1000, function()
+        if DoesBlipExist(blip) then RemoveBlip(blip) end
+        if DoesBlipExist(radiusBlip) then RemoveBlip(radiusBlip) end
+    end)
 end)
 
 AddEventHandler('onResourceStop', function(res)
