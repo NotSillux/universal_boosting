@@ -26,7 +26,7 @@ RegisterCommand(Config.Admin.command, function(src, args)
     local sub = (args[1] or 'help'):lower()
 
     if sub == 'help' then
-        reply(src, 'setlevel <id> <lvl> | givexp <id> <amt> | grant <id> <tier> | clear <id> | reset <id> | stats')
+        reply(src, 'setlevel <id> <lvl> | givexp <id> <amt> | grant <id> <tier> | clear <id> | reset <id> | stats | vinlogs [n]')
 
     elseif sub == 'stats' then
         local active, queued = 0, 0
@@ -83,6 +83,16 @@ RegisterCommand(Config.Admin.command, function(src, args)
             { session.profile.identifier })
         Boost.sessions[target] = nil
         reply(src, ('reset %s'):format(session.name))
+
+    elseif sub == 'vinlogs' then
+        -- audit trail of police VIN checks (see server/vincheck.lua)
+        local n = math.min(math.max(tonumber(args[2]) or 10, 1), 50)
+        local rows = DB.query('SELECT * FROM `boosting_vin_checks` ORDER BY `id` DESC LIMIT ?', { n })
+        if #rows == 0 then reply(src, 'no VIN checks logged yet'); return end
+        for _, r in ipairs(rows) do
+            reply(src, ('#%d %s | %s checked %s -> %s'):format(
+                r.id, tostring(r.created_at), r.officer_name or r.officer, r.plate, r.result))
+        end
     else
         reply(src, 'unknown subcommand — try help')
     end

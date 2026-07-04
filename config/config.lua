@@ -343,6 +343,56 @@ Config.Leaderboard = {
 }
 
 -- ═══════════════════════════════════════════════════════════════════════════
+--  VIN-SCRATCH GARAGE STORAGE
+--  After a successful VIN scratch the car gets a CLEAN identity: a fresh plate
+--  is generated server-side, the vehicle is registered to the player in the
+--  server's garage database, and keys are handed out for the new plate — so
+--  the player can store it in any normal garage afterwards.
+--
+--  system:
+--    'auto'   : QB/Qbox -> insert into `player_vehicles`
+--               ESX     -> insert into `owned_vehicles`
+--               (both are the standard tables every mainstream garage script
+--                reads: qb-garages, qs, jg, cd_garage, esx_garage, okokGarage…)
+--    'qb'/'esx' : force one of the above
+--    'custom' : call Config.Garage.custom(src, data) and do it yourself
+--    'none'   : keep the car spawned but don't register ownership
+-- ═══════════════════════════════════════════════════════════════════════════
+
+Config.Garage = {
+    enabled       = true,
+    system        = 'auto',
+    defaultGarage = 'pillboxgarage',  -- QB only: which garage the car belongs to
+    -- custom integration (system = 'custom'):
+    -- data = { identifier, plate, model, hash, props (table), tier }
+    custom = function(src, data)
+        -- e.g. exports['my_garage']:RegisterVehicle(src, data.plate, data.props)
+    end,
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  POLICE VIN CHECK
+--  Lets authorized jobs inspect a vehicle's VIN. Results:
+--    clean     — no record
+--    scratched — the plate belongs to a VIN-scratched boosting car
+--    stolen    — the plate belongs to a LIVE boosting contract (hot car)
+--  Trigger: /checkvin (nearest vehicle or the one you're in), an optional
+--  keybind, or from any target/radial resource via the client export:
+--      exports['universal_boosting']:CheckVin(vehicleEntity)
+--  Every check is logged to `boosting_vin_checks` (/boostadmin vinlogs).
+-- ═══════════════════════════════════════════════════════════════════════════
+
+Config.VinCheck = {
+    enabled     = true,
+    jobs        = { 'police', 'sheriff', 'bcso' }, -- who may run checks (server-checked)
+    command     = 'checkvin',   -- false to disable the command
+    keybind     = false,        -- e.g. 'F7' to add a rebindable key
+    maxDistance = 5.0,          -- metres to the target vehicle
+    scanTime    = 2500,         -- ms the "scanning" takes (roleplay pacing)
+    logChecks   = true,         -- write every check to the DB for admins
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
 --  ADMIN
 -- ═══════════════════════════════════════════════════════════════════════════
 

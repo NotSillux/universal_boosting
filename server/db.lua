@@ -130,6 +130,33 @@ CreateThread(function()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ]])
 
+    -- registry of VIN-scratched vehicles (their new clean plates) — the police
+    -- VIN check looks plates up here
+    DB.execute([[
+        CREATE TABLE IF NOT EXISTS `boosting_vin_records` (
+            `plate` VARCHAR(12) NOT NULL,
+            `identifier` VARCHAR(64) NOT NULL,
+            `model` VARCHAR(48) NOT NULL,
+            `tier` VARCHAR(4) DEFAULT NULL,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`plate`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]])
+
+    -- audit log of police VIN checks (/boostadmin vinlogs)
+    DB.execute([[
+        CREATE TABLE IF NOT EXISTS `boosting_vin_checks` (
+            `id` INT NOT NULL AUTO_INCREMENT,
+            `officer` VARCHAR(64) NOT NULL,
+            `officer_name` VARCHAR(64) DEFAULT NULL,
+            `plate` VARCHAR(12) NOT NULL,
+            `result` VARCHAR(16) NOT NULL,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_plate` (`plate`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ]])
+
     Utils.Debug('boosting migrations complete')
     TriggerEvent('boosting:dbReady')
 end)

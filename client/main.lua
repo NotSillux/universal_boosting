@@ -167,6 +167,77 @@ RegisterCommand('crewdecline', function()
     Bridge.Framework.client.Notify('Crew invite declined.', 'inform')
 end, false)
 
+-- ── Police VIN check ────────────────────────────────────────────────────────
+-- /checkvin scans the vehicle you're in (or the nearest one). Job whitelist,
+-- distance and the result lookup are all validated SERVER-side — this client
+-- code is just the trigger + presentation. Target/radial resources can call
+-- the same flow via:  exports['universal_boosting']:CheckVin(vehicleEntity)
+
+local vinCheckBusy = false
+
+local function nearestVehicle(maxDist)
+    local ped = PlayerPedId()
+    if IsPedInAnyVehicle(ped, false) then return GetVehiclePedIsIn(ped, false) end
+    local pc = GetEntityCoords(ped)
+    local best, bestDist = nil, maxDist
+    for _, veh in ipairs(GetGamePool('CVehicle')) do
+        local d = #(GetEntityCoords(veh) - pc)
+        if d < bestDist then best, bestDist = veh, d end
+    end
+    return best
+end
+
+local function runVinCheck(veh)
+    if vinCheckBusy or not Config.VinCheck.enabled then return end
+    veh = veh or nearestVehicle(Config.VinCheck.maxDistance)
+    if not veh or not DoesEntityExist(veh) then
+        Bridge.Framework.client.Notify('No vehicle in range to check.', 'error')
+        return
+    end
+
+    vinCheckBusy = true
+    Bridge.Framework.client.Notify('Running VIN check…', 'inform')
+    Wait(Config.VinCheck.scanTime or 2500)
+
+    local r = ServerCallback('vin:check', { netId = NetworkGetNetworkIdFromEntity(veh) })
+    vinCheckBusy = false
+
+    if not r or r.error then
+        local msgs = {
+            not_authorized = 'You are not authorized to run VIN checks.',
+            no_vehicle = 'Could not read the vehicle.',
+            too_far = 'You are too far from the vehicle.',
+            vin_disabled = 'VIN checks are disabled.',
+        }
+        Bridge.Framework.client.Notify(msgs[r and r.error] or 'VIN check failed.', 'error')
+        return
+    end
+
+    if r.result == 'stolen' then
+        Bridge.Framework.client.Notify(('🚨 VIN check [%s]: vehicle reported STOLEN — active theft flag.')
+            :format(r.plate), 'error')
+    elseif r.result == 'scratched' then
+        Bridge.Framework.client.Notify(('⚠️ VIN check [%s]: VIN has been SCRATCHED — identity is forged.')
+            :format(r.plate), 'error')
+    else
+        Bridge.Framework.client.Notify(('✅ VIN check [%s]: VIN is clean.'):format(r.plate), 'success')
+    end
+end
+
+-- export for target / radial / MDT resources (pass the vehicle entity)
+exports('CheckVin', function(veh)
+    CreateThread(function() runVinCheck(veh) end)
+end)
+
+if Config.VinCheck.enabled and Config.VinCheck.command then
+    RegisterCommand(Config.VinCheck.command, function() runVinCheck() end, false)
+end
+if Config.VinCheck.enabled and Config.VinCheck.keybind then
+    RegisterCommand('+boostvincheck', function() runVinCheck() end, false)
+    RegisterCommand('-boostvincheck', function() end, false)
+    RegisterKeyMapping('+boostvincheck', 'Police: check vehicle VIN', 'keyboard', Config.VinCheck.keybind)
+end
+
 -- ── Notifications & server-pushed events ────────────────────────────────────
 
 RegisterNetEvent('boosting:notify', function(data)

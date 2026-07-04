@@ -233,6 +233,7 @@ RegisterCallback('contract:hackResult', function(src, session, data)
         end
     end
     local plate = type(data.plate) == 'string' and data.plate:sub(1, 12) or ''
+    c.plate = plate ~= '' and plate or nil   -- hot plate → police VIN checks report 'stolen'
     local keyTargets = { src }
     if c.groupId then
         local members = Groups.Members(c.groupId)
@@ -481,11 +482,45 @@ RegisterCallback('contract:vin', function(src, session, data)
     payout(src, session, c, reward)
     history(session.identifier, c.tier, c.model, 'vin_scratched', Utils.Round(reward))
 
-    -- let server owners hook their keys/garage system to keep the car
-    TriggerEvent('boosting:vehicleKept', src, { model = c.model, tier = c.tier, plate = data.plate })
+    -- ── clean identity: fresh plate + garage registration + keys ──────────
+    -- The scratched car gets a new server-generated plate and is inserted
+    -- into the framework's vehicle-ownership table (see server/garage.lua),
+    -- so the player can store it in any normal garage. The plate is also
+    -- recorded in `boosting_vin_records` — police VIN checks will flag it
+    -- as 'scratched' forever.
+    local newPlate = Garage.GeneratePlate()
+    local garaged = false
+    if Config.Garage.enabled then
+        garaged = Garage.Register(src, session, {
+            plate = newPlate,
+            model = c.model,
+            props = type(data.props) == 'table' and data.props or nil,
+            tier = c.tier,
+        })
+    end
+    DB.execute([[INSERT IGNORE INTO `boosting_vin_records` (`plate`,`identifier`,`model`,`tier`)
+                 VALUES (?,?,?,?)]], { newPlate, session.identifier, c.model, c.tier })
+
+    -- give keys for the NEW plate (entity resolved from the client's net id)
+    local veh = 0
+    if type(data.netId) == 'number' then
+        local ent = NetworkGetEntityFromNetworkId(data.netId)
+        if ent ~= 0 and DoesEntityExist(ent)
+            and #(GetEntityCoords(ent) - coords) <= 30.0 then
+            veh = ent
+        end
+    end
+    pcall(Config.GiveKeysServer, src, veh, newPlate)
+    c.plate = nil -- no longer a hot plate; the new identity lives in vin_records
+
+    -- legacy hook (kept for compatibility) + richer event with the new plate
+    TriggerEvent('boosting:vehicleKept', src, { model = c.model, tier = c.tier, plate = newPlate })
+    TriggerEvent('boosting:vehicleRegistered', src, { model = c.model, tier = c.tier,
+        plate = newPlate, garaged = garaged })
 
     clearActive(src)
-    return { ok = true, reward = Utils.Round(reward), kept = true }
+    return { ok = true, reward = Utils.Round(reward), kept = true,
+             newPlate = newPlate, garaged = garaged }
 end)
 
 RegisterCallback('contract:abandon', function(src, session)

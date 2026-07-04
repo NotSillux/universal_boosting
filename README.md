@@ -118,6 +118,8 @@ Everything is in one heavily-commented file:
 | `Config.Police` | min cops online, dispatch alert, escape rules (lose stars / distance), applied wanted level |
 | `Config.Dispatch` | hook for your dispatch system (ps-dispatch, cd_dispatch, …) |
 | `Config.Groups` | crew size, reward split (`equal`/`leader`), XP sharing, invite expiry |
+| `Config.Garage` | VIN-scratch garage storage: backend (`auto`/`qb`/`esx`/`custom`), default garage |
+| `Config.VinCheck` | police VIN checks: job whitelist, command/keybind, scan time, audit logging |
 | `Config.Auction` | duration, min bid, listing fee, max listings |
 | `Config.Leaderboard` | top N, weekly reset day |
 | `Config.Admin` | command name + ACE permission |
@@ -172,15 +174,66 @@ Server events you can hook:
 -- (the built-in police alert + wanted level already work with zero deps)
 ```
 
-### Keeping a VIN-scratched car
+### Keeping a VIN-scratched car (automatic garage storage)
 
-When a VIN scratch completes, the server fires:
+When a VIN scratch completes the car gets a **clean identity, automatically**:
+
+1. The server generates a **fresh plate** (unique against your vehicle tables).
+2. The vehicle is **registered to the player** in the framework's standard
+   ownership table — `player_vehicles` on QB/Qbox, `owned_vehicles` on ESX —
+   which every mainstream garage script reads (qb-garages, qs, jg, cd_garage,
+   esx_garage, okokGarage, loaf_garage, …). The row is inserted with
+   `state/stored = 0` (car is out in the world), so the player simply drives
+   to any garage and **stores it normally**.
+3. **Keys for the new plate** are handed out (server-side + client-side hooks,
+   same system as the tracker hack).
+4. The new plate is recorded in `boosting_vin_records` — police VIN checks
+   flag it as *scratched* forever (see below).
+
+Configure in `Config.Garage`:
+
+| Key | Meaning |
+|---|---|
+| `enabled` | master switch (off = car stays spawned but unowned, old behaviour) |
+| `system` | `'auto'` (QB→`player_vehicles`, ESX→`owned_vehicles`), `'qb'`, `'esx'`, `'custom'`, `'none'` |
+| `defaultGarage` | QB only: the garage id written to the row |
+| `custom` | `function(src, data)` — wire any non-standard garage; `data = { identifier, plate, model, hash, props, tier }` |
+
+Events fired on completion (for extra integrations):
 ```lua
-AddEventHandler('boosting:vehicleKept', function(src, data)
-    -- data = { model, tier, plate }
-    -- hook your keys / garage system here to permanently give the car
-end)
+AddEventHandler('boosting:vehicleKept', function(src, data) end)        -- legacy: { model, tier, plate }
+AddEventHandler('boosting:vehicleRegistered', function(src, data) end)  -- { model, tier, plate, garaged }
 ```
+
+### Police VIN check
+
+Authorized jobs can inspect any vehicle's VIN (`Config.VinCheck`):
+
+- **`/checkvin`** — checks the vehicle the officer is in, or the nearest one
+  within `maxDistance`. Optional rebindable key via `keybind = 'F7'`.
+- **Target / radial / MDT integration** — call the client export with the
+  vehicle entity:
+  ```lua
+  -- ox_target example:
+  exports.ox_target:addGlobalVehicle({{
+      name = 'boost_vincheck', icon = 'fas fa-barcode', label = 'Check VIN',
+      groups = { 'police' },
+      onSelect = function(data) exports['universal_boosting']:CheckVin(data.entity) end,
+  }})
+  ```
+- **Results** (derived server-side; the plate is read from the entity, never
+  trusted from the client):
+  - `clean` — *"VIN is clean."*
+  - `scratched` — the plate is in `boosting_vin_records` → *"VIN has been
+    SCRATCHED — identity is forged."*
+  - `stolen` — the plate belongs to a **live** boosting contract → *"vehicle
+    reported STOLEN."*
+- **Server-authoritative**: the job whitelist (`jobs`), the distance check and
+  the lookup all run on the server; a non-police client calling the callback
+  gets `not_authorized`.
+- **Audit log**: every check is written to `boosting_vin_checks`
+  (officer, plate, result, timestamp) — review with `/boostadmin vinlogs [n]`.
+  Disable with `logChecks = false`.
 
 ---
 

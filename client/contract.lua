@@ -283,12 +283,53 @@ function deliverClean()
     end
 end
 
+--- Best-effort vehicle properties for the garage row: use the framework's
+--- full getter when available (mods survive), else a minimal fallback.
+local function getVehicleProps(veh)
+    local ok, props = pcall(function()
+        if lib and lib.getVehicleProperties then return lib.getVehicleProperties(veh) end -- ox_lib (Qbox)
+    end)
+    if ok and props then return props end
+    ok, props = pcall(function()
+        if GetResourceState('qb-core'):find('start') then
+            return exports['qb-core']:GetCoreObject().Functions.GetVehicleProperties(veh)
+        end
+    end)
+    if ok and props then return props end
+    ok, props = pcall(function()
+        if GetResourceState('es_extended'):find('start') then
+            return exports['es_extended']:getSharedObject().Game.GetVehicleProperties(veh)
+        end
+    end)
+    if ok and props then return props end
+    local c1, c2 = GetVehicleColours(veh)
+    return { model = GetEntityModel(veh), color1 = c1, color2 = c2,
+             plate = GetVehicleNumberPlateText(veh) }
+end
+
 function scratchVin()
     notify('Scratching VIN...', 'inform')
     local success = runMinigame(Config.Contract.vinScratchGame, Config.Contract.vinScratchDiff)
-    local r = ServerCallback('contract:vin', { success = success, plate = world.plate })
+
+    -- capture the vehicle's state BEFORE the callback (props for the garage
+    -- row, net id so the server can hand out keys for the new plate)
+    local props = world.veh and DoesEntityExist(world.veh) and getVehicleProps(world.veh) or nil
+    local netId = world.veh and DoesEntityExist(world.veh) and NetworkGetNetworkIdFromEntity(world.veh) or nil
+
+    local r = ServerCallback('contract:vin', {
+        success = success, plate = world.plate, netId = netId, props = props,
+    })
     if r and r.ok and r.kept then
+        -- apply the clean identity: new plate + client-side keys
+        if r.newPlate and world.veh and DoesEntityExist(world.veh) then
+            SetVehicleNumberPlateText(world.veh, r.newPlate)
+            pcall(Config.GiveKeys, world.veh, r.newPlate)
+        end
         notify(('VIN scratched — the car is yours! +%d %s'):format(r.reward or 0, Config.Currency.label), 'success')
+        if r.garaged then
+            notify(('Registered to your garage under plate %s — park it anywhere you normally store cars.')
+                :format(r.newPlate or '?'), 'success')
+        end
         BClient.EndWorldPhase('vin')
     elseif r and r.failed then
         notify('Botched it — try the scratch again.', 'error')
