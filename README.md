@@ -131,10 +131,21 @@ Every stolen vehicle is fitted with a **GPS tracker** the moment it's boosted:
 - Disabling it is **mandatory** — you can't deliver or VIN-scratch while it's
   live (`Config.Tracker.blockDelivery`). Disabling triggers a hacking minigame
   (the same one the laptop Terminal uses, via the shared `StartHacking` export).
-- **Crew rule:** solo boosters disable it themselves. In a crew, only the
-  **leader** or the member the leader assigns as **Hacker** (Crew tab → *Make
-  hacker*) sees the *Disable GPS Tracker* button; everyone else is told
-  *"Only the crew hacker/leader can disable the GPS tracker."*
+- **Crew rule** (`Config.Tracker.crewRule`): solo boosters always disable it
+  themselves. In a crew, who may disable it depends on the rule:
+  - `'non_leader'` *(default)* — the **leader cannot** disable it; any **other**
+    crew member must do it. Forces teamwork: the leader drives, a passenger
+    breaks the tracker. Everyone else (including the leader) sees
+    *"Only a crew member who is not the leader can disable the GPS tracker."*
+    Safety: a leader whose crew has no other online members is treated as solo,
+    so the job can never soft-lock.
+  - `'hacker'` — the leader or the member assigned as **Hacker**
+    (Crew tab → *Make hacker*) may disable it.
+  - `'any'` — any crew member may disable it.
+
+  Only eligible players see the *Disable GPS Tracker* button, and the server
+  re-checks eligibility on every attempt — the button is cosmetic, the rule is
+  enforced server-side.
 - **Escalation:** if the tracker isn't killed within `Config.Tracker.disableTime`
   seconds, the booster's wanted level is forced up and police get re-alerted to
   the live position every `escalation.alertInterval` seconds until it's down.
@@ -144,6 +155,7 @@ Config lives in `Config.Tracker`:
 | Key | Meaning |
 |---|---|
 | `enabled` | master switch for the whole tracker system |
+| `crewRule` | `'non_leader'` (leader can't disable — teamwork), `'hacker'`, or `'any'` |
 | `disableTime` | seconds to disable before the police response escalates |
 | `perTier` | enable/disable the tracker per contract tier (D → S+) |
 | `minigame` / `difficulty` | which hack minigame the disable uses |

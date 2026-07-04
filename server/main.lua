@@ -174,6 +174,7 @@ RegisterCallback('boot', function(src, session)
             auctionEnabled = Config.Auction.enabled,
             hackerXpPerLevel = Config.Progression.hackerXpPerLevel,
             driverXpPerLevel = Config.Progression.driverXpPerLevel,
+            trackerRule = Config.Tracker.crewRule or 'non_leader',
         },
     }
 end)
@@ -194,6 +195,8 @@ local function registerWithLaptop()
             icon        = Config.Store.icon,
             price       = Config.Store.price,
             screenshots = Config.Store.screenshots,
+            -- laptop must be connected to this network to install (e.g. darknet)
+            network     = Config.Store.requiresNetwork or nil,
             -- fired after a player installs us via the store
             onInstall = function(installSrc)
                 Utils.Debug(('installed by %s'):format(installSrc))

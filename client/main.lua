@@ -128,8 +128,12 @@ RegisterNUICallback('disableTracker', function(_, cb)
         Bridge.Framework.client.Notify(('Breach failed — wait %ds and try again.'):format(Config.Tracker.failCooldown or 8), 'error')
     elseif r and r.error == 'on_cooldown' then
         Bridge.Framework.client.Notify('Tracker rejected the breach — cooling down.', 'error')
-    elseif r and r.error == 'not_hacker' then
-        Bridge.Framework.client.Notify('Only the crew hacker/leader can disable the GPS tracker.', 'error')
+    elseif r and r.error == 'not_eligible' then
+        -- message depends on the active crew rule (Config.Tracker.crewRule)
+        local rule = Config.Tracker.crewRule or 'non_leader'
+        Bridge.Framework.client.Notify(rule == 'non_leader'
+            and 'Only a crew member who is not the leader can disable the GPS tracker.'
+            or 'Only the crew hacker/leader can disable the GPS tracker.', 'error')
     elseif r and r.error then
         Bridge.Framework.client.Notify('Tracker breach failed.', 'error')
     end

@@ -130,6 +130,10 @@ local function trackerPayload(c, src)
         escalated  = tr.escalated or false,
         canDisable = tr.active and Contracts.CanDisable(src, c) or false,
         failCooldown = Config.Tracker.failCooldown,
+        -- which crew rule is active + whether this is a crew job, so the UI
+        -- can explain WHO can disable it (see Config.Tracker.crewRule)
+        rule       = Config.Tracker.crewRule or 'non_leader',
+        isCrewJob  = c.groupId ~= nil,
     }
 end
 
@@ -365,7 +369,9 @@ end)
 RegisterCallback('tracker:disable', function(src, session, data)
     local c = Contracts.ResolveForPlayer(src)
     if not c or not c.tracker or not c.tracker.active then return { error = 'no_tracker' } end
-    if not Contracts.CanDisable(src, c) then return { error = 'not_hacker' } end
+    -- crew eligibility (rule-dependent, see Config.Tracker.crewRule) is
+    -- enforced HERE — hiding the button client-side is cosmetic only
+    if not Contracts.CanDisable(src, c) then return { error = 'not_eligible' } end
 
     -- honour the fail cooldown
     if c.tracker.lastFail and (os.time() - c.tracker.lastFail) < Config.Tracker.failCooldown then

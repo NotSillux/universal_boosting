@@ -64,12 +64,28 @@ function Groups.GetPayload(src, session)
     }
 end
 
---- Who in a crew may disable the GPS tracker: the leader, or the assigned hacker.
---- (Solo boosters are handled directly in contracts.lua.)
+--- Who in a crew may disable the GPS tracker (solo boosters are handled in
+--- contracts.lua). Behaviour switches on Config.Tracker.crewRule:
+---   'non_leader' — the leader may NOT disable it; any other member must.
+---                  Forces teamwork. If the leader is the only online member,
+---                  they're effectively solo, so they may disable it (no
+---                  soft-lock).
+---   'hacker'     — the leader or the assigned Hacker (legacy behaviour).
+---   'any'        — any crew member.
 function Groups.CanDisableTracker(src, groupId)
     local g = Groups.groups[groupId]
-    if not g then return false end
-    return src == g.leader or (g.hacker ~= nil and src == g.hacker)
+    if not g or not g.members[src] then return false end
+
+    local rule = Config.Tracker.crewRule or 'non_leader'
+    if rule == 'non_leader' then
+        if #Groups.Members(groupId) <= 1 then
+            return src == g.leader          -- lone leader = solo, don't soft-lock
+        end
+        return src ~= g.leader              -- teamwork: anyone BUT the leader
+    elseif rule == 'hacker' then
+        return src == g.leader or (g.hacker ~= nil and src == g.hacker)
+    end
+    return true                             -- 'any'
 end
 
 local function broadcastUpdate(groupId)

@@ -22,6 +22,10 @@ Config.Store = {
     category    = 'Crime',
     icon        = '🚗',
     price       = 0,        -- charged from the laptop's Config.Store.currency
+    -- Require the laptop to be connected to this Config.Networks id (in the
+    -- LAPTOP resource) before the app can be installed. Set false for no gate.
+    -- 'darknet' is the hidden dark-web network shipped in the laptop config.
+    requiresNetwork = 'darknet',
     description = "Run high-risk vehicle theft contracts.\n\n" ..
                   "• Steal cars, hack their trackers and outrun the cops\n" ..
                   "• Team up with a crew and share the payout\n" ..
@@ -158,8 +162,8 @@ Config.Contract = {
 --  (delivery / VIN scratch are blocked while it is still active). If it isn't
 --  disabled in time, the police response escalates hard.
 --
---  Crew rule: solo boosters disable it themselves; in a crew ONLY the leader or
---  the member assigned as "Hacker" gets the disable action.
+--  Crew rule: solo boosters disable it themselves. In a crew, WHO may disable
+--  is controlled by Config.Tracker.crewRule (see below).
 -- ═══════════════════════════════════════════════════════════════════════════
 
 Config.Tracker = {
@@ -170,6 +174,18 @@ Config.Tracker = {
     updateInterval = 3,        -- seconds between live position broadcasts
     failCooldown   = 8,        -- seconds you must wait after a failed disable attempt
     blockDelivery  = true,     -- can't deliver / VIN-scratch until the tracker is down
+
+    -- Who may disable the tracker when boosting AS A CREW (solo players always
+    -- disable it themselves):
+    --   'non_leader' : the leader CANNOT disable it — any OTHER crew member
+    --                  must do it (forces teamwork; the driver/leader keeps
+    --                  driving while a passenger breaks the tracker).
+    --                  Safety: if the leader is the only online member, they
+    --                  are treated as solo so the job can't soft-lock.
+    --   'hacker'     : the leader OR the member assigned as "Hacker" in the
+    --                  Crew tab may disable it.
+    --   'any'        : any crew member may disable it.
+    crewRule       = 'non_leader',
 
     -- Whether a tracker is attached per contract tier (set false to exempt a tier)
     perTier = {

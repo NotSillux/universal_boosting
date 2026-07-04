@@ -220,7 +220,13 @@ const Boost = (() => {
                     disable.onclick = () => post('disableTracker');
                     box.appendChild(disable);
                 } else {
-                    box.appendChild(el('div', 'tk-note', '🔒 Only the crew hacker/leader can disable the GPS tracker.'));
+                    // explain WHO can disable it, based on the active crew rule
+                    const note = tr.rule === 'non_leader'
+                        ? '🔒 Only a crew member who is not the leader can disable the GPS tracker.'
+                        : tr.rule === 'hacker'
+                            ? '🔒 Only the crew hacker/leader can disable the GPS tracker.'
+                            : '🔒 A crew member must disable the GPS tracker.';
+                    box.appendChild(el('div', 'tk-note', note));
                 }
             } else {
                 box.appendChild(el('div', 'muted', 'Tracker offline — you\'re clear to deliver or scratch the VIN.'));
@@ -293,7 +299,13 @@ const Boost = (() => {
 
         const card = el('div', 'card');
         card.appendChild(el('h3', '', `Your Crew (${g.members.length}/${S.boot.config.maxGroupSize})`));
-        card.appendChild(el('div', 'muted', 'The leader ♛ and the designated hacker 📡 can disable GPS trackers during a job.'));
+        // hint about the active GPS-tracker crew rule (Config.Tracker.crewRule)
+        const trackerRule = S.boot.config.trackerRule || 'non_leader';
+        card.appendChild(el('div', 'muted', trackerRule === 'non_leader'
+            ? 'GPS trackers must be disabled by a crew member who is NOT the leader ♛ — bring backup.'
+            : trackerRule === 'hacker'
+                ? 'The leader ♛ and the designated hacker 📡 can disable GPS trackers during a job.'
+                : 'Any crew member can disable GPS trackers during a job.'));
         for (const m of g.members) {
             const row = el('div', 'member');
             row.appendChild(el('div', 'av', (m.name || '?').charAt(0).toUpperCase()));
@@ -305,17 +317,20 @@ const Boost = (() => {
             row.appendChild(info);
 
             const rowActions = el('div', 'm-actions');
-            // leader can promote/demote the hacker role (not on the leader —
-            // the leader can always disable the tracker anyway)
             if (g.isLeader && !m.isLeader) {
-                const setH = el('button', 'btn ghost sm', m.isHacker ? 'Unset hacker' : 'Make hacker');
-                setH.onclick = async () => {
-                    await api('group:setHacker', { target: m.isHacker ? false : m.src });
-                    refresh();
-                };
+                // the Hacker role only matters under the 'hacker' rule — hide
+                // the assignment button for the other rules to avoid confusion
+                if (trackerRule === 'hacker') {
+                    const setH = el('button', 'btn ghost sm', m.isHacker ? 'Unset hacker' : 'Make hacker');
+                    setH.onclick = async () => {
+                        await api('group:setHacker', { target: m.isHacker ? false : m.src });
+                        refresh();
+                    };
+                    rowActions.appendChild(setH);
+                }
                 const kick = el('button', 'btn danger sm', 'Kick');
                 kick.onclick = async () => { await api('group:kick', { target: m.src }); refresh(); };
-                rowActions.append(setH, kick);
+                rowActions.appendChild(kick);
             }
             rowActions.style.marginLeft = 'auto';
             row.appendChild(rowActions);
@@ -504,7 +519,7 @@ const Boost = (() => {
         no_listable_contract: 'No un-started contract to list.',
         too_many_listings: 'You have too many active listings.',
         tracker_active: 'Disable the GPS tracker before you can finish the job.',
-        not_hacker: 'Only the crew hacker/leader can disable the GPS tracker.',
+        not_eligible: 'You are not allowed to disable this GPS tracker.',
         on_cooldown: 'Tracker breach on cooldown — try again shortly.',
         no_tracker: 'No active tracker to disable.',
         nui_error: 'Connection error.',
