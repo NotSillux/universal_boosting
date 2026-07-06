@@ -1,10 +1,11 @@
-/* Universal Boosting — NUI app. Runs both embedded in the laptop (iframe) and
-   standalone (this resource's ui_page). All actions are relayed to the server
-   through the boosting client's 'api' NUI callback. */
+/* Universal Boosting — NUI app. LAPTOP-EXCLUSIVE: this page is only ever
+   loaded as an iframe inside the NexOS Laptop's window (see client/main.lua's
+   RegisterApp call) — there is no standalone/tablet mode. All actions are
+   relayed to the server through the boosting client's 'api' NUI callback. */
 'use strict';
 
 const Boost = (() => {
-    // resolve this resource for fetch(), works in iframe and standalone
+    // resolve this resource for fetch()
     const RES = (location.hostname || '').replace(/^cfx-nui-/, '') || 'universal_boosting';
 
     const S = {
@@ -38,6 +39,67 @@ const Boost = (() => {
         setTimeout(() => t.remove(), 4200);
     }
 
+    // ── In-app dialog ────────────────────────────────────────────────────────
+    // Replaces window.prompt()/confirm(): those are native browser dialogs and
+    // in FiveM's CEF they render as their OWN top-level OS window, completely
+    // separate from (and behind) the game and this app's UI — effectively
+    // invisible to a player in-game. This renders inside #dialog-layer instead.
+    //
+    // dialog({ title, message, inputs: [{ id, label, type, value, placeholder }],
+    //          okLabel, cancelLabel, danger }) -> Promise<values|null>
+    function dialog(opts) {
+        return new Promise((resolve) => {
+            const layer = document.getElementById('dialog-layer');
+            layer.innerHTML = '';
+            layer.classList.remove('hidden');
+
+            const box = el('div', 'dlg');
+            if (opts.title) box.appendChild(el('h3', '', opts.title));
+            if (opts.message) box.appendChild(el('p', '', opts.message));
+
+            const fields = {};
+            for (const inp of opts.inputs || []) {
+                if (inp.label) box.appendChild(el('label', 'fl', inp.label));
+                const field = el('input');
+                field.type = inp.type || 'text';
+                if (inp.value !== undefined && inp.value !== null) field.value = inp.value;
+                if (inp.placeholder) field.placeholder = inp.placeholder;
+                box.appendChild(field);
+                fields[inp.id] = field;
+            }
+
+            const btns = el('div', 'dlg-buttons');
+            const close = (result) => { layer.classList.add('hidden'); layer.innerHTML = ''; resolve(result); };
+
+            const cancel = el('button', 'btn ghost', opts.cancelLabel || 'Cancel');
+            cancel.onclick = () => close(null);
+            const ok = el('button', `btn ${opts.danger ? 'danger' : 'primary'}`, opts.okLabel || 'Confirm');
+            ok.onclick = () => {
+                const values = {};
+                for (const [id, f] of Object.entries(fields)) values[id] = f.value;
+                close(values);
+            };
+            btns.append(cancel, ok);
+            box.appendChild(btns);
+            layer.appendChild(box);
+
+            // click the dim backdrop to cancel
+            layer.onmousedown = (e) => { if (e.target === layer) close(null); };
+            box.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); ok.click(); }
+                if (e.key === 'Escape') { e.preventDefault(); close(null); }
+                e.stopPropagation();
+            });
+
+            const first = Object.values(fields)[0];
+            setTimeout(() => (first ? first.focus() : ok.focus()), 30);
+        });
+    }
+
+    /** Simple yes/no confirmation dialog. Returns a boolean. */
+    const dlgConfirm = (title, message, danger = true) =>
+        dialog({ title, message, danger, okLabel: 'Confirm' }).then((v) => v !== null);
+
     // ── Navigation ───────────────────────────────────────────────────────────
     const NAV = [
         ['dashboard', '⊞', 'Dashboard'],
@@ -45,6 +107,7 @@ const Boost = (() => {
         ['auction', '⚖', 'Auction'],
         ['leaderboard', '★', 'Leaderboards'],
         ['history', '≡', 'History'],
+        ['admin', '🛡', 'Admin'],
     ];
 
     function renderNav() {
@@ -52,6 +115,9 @@ const Boost = (() => {
         nav.innerHTML = '';
         for (const [id, ico, label] of NAV) {
             if (id === 'auction' && S.boot && S.boot.config && !S.boot.config.auctionEnabled) continue;
+            // Admin tab is a UI convenience only — every admin:* callback
+            // re-checks the ACE permission server-side regardless (server/admin.lua)
+            if (id === 'admin' && !(S.boot && S.boot.isAdmin)) continue;
             const b = el('button', 'nav-item' + (S.tab === id ? ' active' : ''));
             b.style.position = 'relative';
             b.append(el('span', 'ico', ico), el('span', '', label));
@@ -88,7 +154,7 @@ const Boost = (() => {
         const view = document.getElementById('view');
         view.innerHTML = '';
         ({ dashboard: viewDashboard, crew: viewCrew, auction: viewAuction,
-           leaderboard: viewLeaderboard, history: viewHistory })[S.tab](view);
+           leaderboard: viewLeaderboard, history: viewHistory, admin: viewAdmin })[S.tab](view);
     }
 
     // Dashboard: profile stats + queue / active contract
@@ -175,8 +241,9 @@ const Boost = (() => {
         const hero = el('div', 'contract-hero');
         const bt = el('div', 'big-tier', c.tier); bt.style.background = tierColor(c.tier);
         const info = el('div', 'ch-info');
-        info.append(el('div', 'ch-model', c.model), el('div', 'ch-meta',
-            `${c.tierLabel} · ${c.police}★ police response · VIN scratch ×${c.vinMultiplier}`));
+        let metaLine = `${c.tierLabel} · ${c.police}★ police response · VIN scratch ×${c.vinMultiplier}`;
+        if (c.searchZone) metaLine += ` · 🔍 search zone (~${Math.round(c.searchZone.radius)}m)`;
+        info.append(el('div', 'ch-model', c.model), el('div', 'ch-meta', metaLine));
         const reward = el('div'); reward.appendChild(el('div', 'ch-reward', money(c.reward)));
         hero.append(bt, info, reward);
 
@@ -236,25 +303,35 @@ const Boost = (() => {
 
         const actions = el('div', 'row');
         if (c.state === 'assigned') {
-            const start = el('button', 'btn primary', '▶ Start contract');
-            start.onclick = () => post('startContract');
-            actions.appendChild(start);
+            // Only the contract OWNER starts it — if a crew member also clicked
+            // Start, they'd spawn their own duplicate copy of the target vehicle
+            // client-side. Crew members can still tag along and search together;
+            // they just don't drive the "Start" button.
+            if (c.isOwner) {
+                const start = el('button', 'btn primary', '▶ Start contract');
+                start.onclick = () => post('startContract');
+                actions.appendChild(start);
 
-            if (S.boot.config.auctionEnabled) {
-                const auc = el('button', 'btn ghost', '⚖ Sell on auction');
-                auc.onclick = () => openAuctionCreate(c);
-                actions.appendChild(auc);
+                if (S.boot.config.auctionEnabled) {
+                    const auc = el('button', 'btn ghost', '⚖ Sell on auction');
+                    auc.onclick = () => openAuctionCreate(c);
+                    actions.appendChild(auc);
+                }
+            } else {
+                actions.appendChild(el('div', 'muted', 'Your crew leader has this contract — help them search once they start it.'));
             }
         } else {
             actions.appendChild(el('div', 'muted', 'Contract in progress — complete it out in the city.'));
         }
-        const abandon = el('button', 'btn danger', 'Abandon');
-        abandon.style.marginLeft = 'auto';
-        abandon.onclick = async () => {
-            const r = await api('contract:abandon');
-            if (r.ok) { toast('Contract', 'Contract abandoned'); refresh(); }
-        };
-        actions.appendChild(abandon);
+        if (c.isOwner) {
+            const abandon = el('button', 'btn danger', 'Abandon');
+            abandon.style.marginLeft = 'auto';
+            abandon.onclick = async () => {
+                const r = await api('contract:abandon');
+                if (r.ok) { toast('Contract', 'Contract abandoned'); refresh(); }
+            };
+            actions.appendChild(abandon);
+        }
         card.appendChild(actions);
         frag.appendChild(card);
         return frag;
@@ -306,6 +383,15 @@ const Boost = (() => {
             : trackerRule === 'hacker'
                 ? 'The leader ♛ and the designated hacker 📡 can disable GPS trackers during a job.'
                 : 'Any crew member can disable GPS trackers during a job.'));
+        // hint about how payouts are split (Config.Groups.payoutMode / fullCrewBonus)
+        const payoutMode = S.boot.config.payoutMode || 'equal';
+        let payoutHint = payoutMode === 'leader_bonus'
+            ? `Payout: split evenly, then the leader ♛ gets a +${Math.round((S.boot.config.leaderBonus || 0) * 100)}% bonus on top.`
+            : 'Payout: split evenly among everyone online.';
+        if (S.boot.config.fullCrewBonus) {
+            payoutHint += ` Everyone gets an extra +${Math.round(S.boot.config.fullCrewBonus * 100)}% if the whole crew is together at delivery.`;
+        }
+        card.appendChild(el('div', 'muted', payoutHint));
         for (const m of g.members) {
             const row = el('div', 'member');
             row.appendChild(el('div', 'av', (m.name || '?').charAt(0).toUpperCase()));
@@ -395,15 +481,28 @@ const Boost = (() => {
             const btnCol = el('div', 'row');
             const bidBtn = el('button', 'btn', 'Bid');
             bidBtn.onclick = async () => {
-                const amount = parseInt(prompt('Bid amount:', (a.topBid || a.startPrice) + 100), 10);
-                if (!amount) return;
+                const suggested = (a.topBid || a.startPrice) + 100;
+                const v = await dialog({
+                    title: `Bid on ${a.model}`,
+                    message: `Current top bid: ${a.topBid ? money(a.topBid) : money(a.startPrice)}`,
+                    inputs: [{ id: 'amount', label: 'Bid amount', type: 'number', value: suggested }],
+                    okLabel: 'Place bid',
+                });
+                if (!v) return;
+                const amount = parseInt(v.amount, 10);
+                if (!amount || amount <= 0) return toast('Auction', 'Enter a valid bid amount.');
                 const rr = await api('auction:bid', { id: a.id, amount });
                 toast('Auction', rr.ok ? 'Bid placed' : errMsg(rr.error)); render();
             };
             btnCol.appendChild(bidBtn);
             if (a.buyout) {
                 const bo = el('button', 'btn good', `Buyout ${money(a.buyout)}`);
-                bo.onclick = async () => { const rr = await api('auction:buyout', { id: a.id }); toast('Auction', rr.ok ? 'Purchased!' : errMsg(rr.error)); refresh(); };
+                bo.onclick = async () => {
+                    const ok = await dlgConfirm('Confirm buyout', `Buy "${a.model}" now for ${money(a.buyout)}?`, false);
+                    if (!ok) return;
+                    const rr = await api('auction:buyout', { id: a.id });
+                    toast('Auction', rr.ok ? 'Purchased!' : errMsg(rr.error)); refresh();
+                };
                 btnCol.appendChild(bo);
             }
             row.appendChild(btnCol);
@@ -492,6 +591,171 @@ const Boost = (() => {
         }
     }
 
+    // Admin panel — nav item + every admin:* callback are gated server-side
+    // (see server/admin.lua); the tab only ever shows for players the server
+    // already told us are admins (S.boot.isAdmin), but that's a UI convenience,
+    // not the actual security boundary.
+    const TIERS = ['D', 'C', 'B', 'A', 'S', 'S+'];
+
+    async function viewAdmin(view) {
+        // live stats
+        const statsCard = el('div', 'card');
+        statsCard.appendChild(el('h3', '', 'Server stats'));
+        const statsRow = el('div', 'row');
+        statsCard.appendChild(statsRow);
+        view.appendChild(statsCard);
+        api('admin:stats').then((r) => {
+            statsRow.innerHTML = '';
+            if (!r.ok) return statsRow.appendChild(el('div', 'muted', errMsg(r.error)));
+            statsRow.append(
+                adminChip('Active contracts', r.stats.active),
+                adminChip('In queue', r.stats.queued),
+                adminChip('Crews', r.stats.crews),
+            );
+        });
+
+        // create a manual contract
+        const createCard = el('div', 'card');
+        createCard.appendChild(el('h3', '', '＋ Create contract'));
+        const row1 = el('div', 'row');
+        const targetInput = el('input'); targetInput.type = 'number'; targetInput.placeholder = 'Server ID';
+        const tierSelect = el('select');
+        for (const t of TIERS) { const o = document.createElement('option'); o.value = t; o.textContent = t; tierSelect.appendChild(o); }
+        const createBtn = el('button', 'btn primary', 'Create');
+        createBtn.onclick = async () => {
+            const target = parseInt(targetInput.value, 10);
+            if (!target) return toast('Admin', 'Enter a server ID.');
+            const r = await api('admin:createContract', { target, tier: tierSelect.value });
+            toast('Admin', r.ok ? 'Contract created' : errMsg(r.error));
+            if (r.ok) refreshActiveContracts();
+        };
+        row1.append(targetInput, tierSelect, createBtn);
+        createCard.appendChild(row1);
+        view.appendChild(createCard);
+
+        // active contracts
+        const activeCard = el('div', 'card');
+        activeCard.appendChild(el('h3', '', 'Active contracts'));
+        const activeList = el('div');
+        activeCard.appendChild(activeList);
+        view.appendChild(activeCard);
+
+        async function refreshActiveContracts() {
+            const r = await api('admin:activeContracts');
+            activeList.innerHTML = '';
+            if (!r.ok) return activeList.appendChild(el('div', 'muted', errMsg(r.error)));
+            if (!r.contracts.length) return activeList.appendChild(el('div', 'empty', 'No active contracts.'));
+            for (const c of r.contracts) {
+                const row = el('div', 'adm-row');
+                const chip = el('span', 'tier-chip', c.tier); chip.style.background = tierColor(c.tier);
+                row.appendChild(chip);
+                const info = el('div', 'a-info');
+                info.append(el('div', 'a-model', `${c.name} (${c.src}) — ${c.model}`),
+                    el('div', 'a-sub', `${c.tierLabel} · ${c.state}${c.isCrew ? ' · crew job' : ''} · ${money(c.reward)}`));
+                row.appendChild(info);
+                const end = el('button', 'btn danger sm', 'Force end');
+                end.onclick = async () => {
+                    const ok = await dlgConfirm('Force end contract', `End ${c.name}'s ${c.tierLabel} contract?`);
+                    if (!ok) return;
+                    const rr = await api('admin:endContract', { target: c.src });
+                    toast('Admin', rr.ok ? 'Contract ended' : errMsg(rr.error));
+                    refreshActiveContracts();
+                };
+                row.appendChild(end);
+                activeList.appendChild(row);
+            }
+        }
+        refreshActiveContracts();
+
+        // player stats lookup / edit
+        const statCard = el('div', 'card');
+        statCard.appendChild(el('h3', '', 'Player stats'));
+        const lookupRow = el('div', 'row');
+        const lookupInput = el('input'); lookupInput.type = 'number'; lookupInput.placeholder = 'Server ID';
+        const loadBtn = el('button', 'btn', 'Load');
+        lookupRow.append(lookupInput, loadBtn);
+        statCard.appendChild(lookupRow);
+        const statBody = el('div');
+        statCard.appendChild(statBody);
+        view.appendChild(statCard);
+
+        loadBtn.onclick = async () => {
+            const target = parseInt(lookupInput.value, 10);
+            if (!target) return toast('Admin', 'Enter a server ID.');
+            const r = await api('admin:playerStats', { target });
+            statBody.innerHTML = '';
+            if (!r.ok) return toast('Admin', errMsg(r.error));
+            const p = r.profile;
+            statBody.appendChild(el('div', 'muted',
+                `${p.name} — Level ${p.level} (${p.xp} XP) · Hacker Lv.${p.hackerLevel} · Driver Lv.${p.driverLevel} · ${p.completed} jobs · ${money(p.earnings)} earned`));
+
+            const editRow = el('div', 'row'); editRow.style.marginTop = '10px';
+            const levelInput = el('input'); levelInput.type = 'number'; levelInput.placeholder = 'New level'; levelInput.style.maxWidth = '110px';
+            const setLevelBtn = el('button', 'btn', 'Set level');
+            setLevelBtn.onclick = async () => {
+                const level = parseInt(levelInput.value, 10);
+                if (!level) return toast('Admin', 'Enter a level.');
+                const rr = await api('admin:setLevel', { target, level });
+                toast('Admin', rr.ok ? 'Level updated' : errMsg(rr.error));
+                if (rr.ok) loadBtn.onclick();
+            };
+            const xpInput = el('input'); xpInput.type = 'number'; xpInput.placeholder = 'XP amount'; xpInput.style.maxWidth = '110px';
+            const giveXpBtn = el('button', 'btn', 'Give XP');
+            giveXpBtn.onclick = async () => {
+                const amount = parseInt(xpInput.value, 10);
+                if (!amount) return toast('Admin', 'Enter an amount.');
+                const rr = await api('admin:giveXp', { target, amount });
+                toast('Admin', rr.ok ? 'XP granted' : errMsg(rr.error));
+                if (rr.ok) loadBtn.onclick();
+            };
+            const resetBtn = el('button', 'btn danger', 'Reset progress');
+            resetBtn.onclick = async () => {
+                const ok = await dlgConfirm('Reset progress', `Wipe ALL boosting progress for ${p.name}? This cannot be undone.`);
+                if (!ok) return;
+                const rr = await api('admin:resetProfile', { target });
+                toast('Admin', rr.ok ? 'Progress reset' : errMsg(rr.error));
+                if (rr.ok) loadBtn.onclick();
+            };
+            editRow.append(levelInput, setLevelBtn, xpInput, giveXpBtn, resetBtn);
+            statBody.appendChild(editRow);
+        };
+
+        // VIN check logs
+        const vinCard = el('div', 'card');
+        const vinHead = el('h3', '', 'Recent VIN checks');
+        const vinRefresh = el('button', 'btn ghost sm', 'Refresh'); vinRefresh.style.marginLeft = 'auto';
+        vinHead.style.display = 'flex'; vinHead.style.alignItems = 'center';
+        vinHead.appendChild(vinRefresh);
+        vinCard.appendChild(vinHead);
+        const vinList = el('div');
+        vinCard.appendChild(vinList);
+        view.appendChild(vinCard);
+
+        async function refreshVinLogs() {
+            const r = await api('admin:vinLogs', { limit: 20 });
+            vinList.innerHTML = '';
+            if (!r.ok) return vinList.appendChild(el('div', 'muted', errMsg(r.error)));
+            if (!r.logs.length) return vinList.appendChild(el('div', 'empty', 'No VIN checks logged yet.'));
+            for (const log of r.logs) {
+                const row = el('div', 'adm-row');
+                const info = el('div', 'a-info');
+                info.append(el('div', 'a-model', `${log.officer_name || log.officer} → ${log.plate}`),
+                    el('div', 'a-sub', String(log.created_at)));
+                row.appendChild(info);
+                row.appendChild(el('div', 'adm-badge ' + log.result, log.result.toUpperCase()));
+                vinList.appendChild(row);
+            }
+        }
+        vinRefresh.onclick = refreshVinLogs;
+        refreshVinLogs();
+    }
+
+    function adminChip(label, value) {
+        const c = el('div', 'stat');
+        c.append(el('div', 'v', String(value)), el('div', 'l', label));
+        return c;
+    }
+
     // ── Misc ─────────────────────────────────────────────────────────────────
 
     function fmtTime(secs) {
@@ -522,6 +786,12 @@ const Boost = (() => {
         not_eligible: 'You are not allowed to disable this GPS tracker.',
         on_cooldown: 'Tracker breach on cooldown — try again shortly.',
         no_tracker: 'No active tracker to disable.',
+        not_authorized: 'You are not authorized to do that.',
+        bad_tier: 'Unknown tier.',
+        assign_failed: 'Could not assign a contract to that player.',
+        no_profile: 'That player has no boosting profile yet.',
+        bad_request: 'Invalid request.',
+        no_contract: 'No active contract.',
         nui_error: 'Connection error.',
     };
     const errMsg = (e) => ERR[e] || (e ? e.replace(/_/g, ' ') : 'Error');
@@ -536,13 +806,11 @@ const Boost = (() => {
         render();
     }
 
-    // true when embedded inside the laptop's window; false when we are the
-    // resource's own top-level ui_page NUI layer.
-    //
-    // We detect this from an explicit ?ctx=laptop marker on the iframe URL
-    // (set by the boosting client's RegisterApp). Iframe/parent detection is
-    // unreliable in FiveM's CEF — the standalone ui_page can appear "framed" —
-    // so the URL marker is the source of truth.
+    // Defense in depth: this page should ONLY ever load with a ?ctx=laptop
+    // marker on its URL (set by the boosting client's RegisterApp call, since
+    // there is no ui_page / standalone mode in fxmanifest.lua). If it somehow
+    // loads without that marker, stay hidden rather than risk rendering
+    // full-screen and uncontrolled.
     let framed = false;
     try { framed = new URLSearchParams(location.search).get('ctx') === 'laptop'; } catch (e) { framed = false; }
 
@@ -559,8 +827,8 @@ const Boost = (() => {
         }
     }
 
-    // hide the app; the standalone ui_page layer stays drawn even without NUI
-    // focus, so it must re-hide itself. (The laptop tears down its iframe.)
+    // The laptop tears down the iframe on close; the `!framed` branch only
+    // matters for the defensive fallback above and is otherwise unreachable.
     function closeApp() {
         post('close');
         if (!framed) document.getElementById('app').classList.add('hidden');

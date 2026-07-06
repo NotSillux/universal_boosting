@@ -15,9 +15,10 @@ author 'Universal'
 description 'Universal Car Boosting — installs into the NexOS Laptop App Store'
 version '1.0.0'
 
--- ui_page lets the app also open standalone (via /boosting) with its own NUI
--- focus. When opened through the laptop it is loaded as an iframe instead.
-ui_page 'html/index.html'
+-- LAPTOP-EXCLUSIVE: intentionally no `ui_page` here. The app's HTML/JS/CSS are
+-- shipped as plain `files{}` below and are only ever loaded as an iframe by
+-- the NexOS Laptop resource (see client/main.lua's RegisterApp call). There is
+-- no standalone/tablet mode and no way to open this UI outside the laptop.
 
 shared_scripts {
     'config/config.lua',
@@ -64,5 +65,7 @@ dependencies {
     '/onesync',
 }
 
--- The laptop resource is an OPTIONAL soft dependency — boosting registers with
--- it if present, but also works via the /boosting command on its own.
+-- The laptop resource is a soft dependency (loaded via GetResourceState polling
+-- in client/main.lua & server/main.lua, not a hard `dependency`), so start
+-- order doesn't matter — but functionally the laptop is REQUIRED, since this
+-- app has no other way to open.

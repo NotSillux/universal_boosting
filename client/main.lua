@@ -3,15 +3,15 @@
       - registers the app in the laptop's App Store (client def, store = true)
       - the NUI<->server callback pipe (mirrors the laptop's)
       - the NUI callbacks its own iframe/page calls
-      - standalone open via /boosting (own NUI focus) and laptop-embedded open
 
-    The same html/index.html runs in two contexts:
-      • as an iframe inside the laptop window (laptop controls focus)
-      • as this resource's own ui_page when opened via /boosting (we control focus)
+    LAPTOP-EXCLUSIVE: this app has no standalone/tablet mode. Its html/index.html
+    is only ever loaded as an iframe inside the laptop's window (see the
+    RegisterApp call below) — there's no `ui_page` in fxmanifest.lua and no
+    command that opens it any other way. All "close the UI" logic below simply
+    closes the laptop.
 ]]
 
 BClient = {
-    standalone = false,   -- true when we opened our own NUI (not via laptop)
     contract = nil,       -- active contract client payload (world phase)
 }
 
@@ -48,9 +48,9 @@ local function registerApp()
             label  = Config.Store.name,
             icon   = Config.Store.icon,
             color  = 'linear-gradient(145deg,#12c2e9,#c471ed)',
-            -- the ?ctx=laptop marker tells the page it is running inside the
-            -- laptop iframe (so it shows immediately). The standalone ui_page
-            -- has no such marker and stays hidden until /boosting opens it.
+            -- the ?ctx=laptop marker tells the page it's safe to render
+            -- immediately since it's being shown inside the laptop's window
+            -- (defense in depth — there's no other way this page ever loads).
             ui     = ('nui://%s/html/index.html?ctx=laptop'):format(GetCurrentResourceName()),
             width  = 980,
             height = 660,
@@ -75,42 +75,27 @@ RegisterNUICallback('api', function(req, cb)
     cb(ServerCallback(req.name, req.data))
 end)
 
--- close the app window; when embedded in the laptop, close the laptop for the
--- player (its own ESC handler can't see keypresses inside our iframe)
-RegisterNUICallback('close', function(_, cb)
-    cb({ ok = true })
-    if BClient.standalone then
-        SetNuiFocus(false, false)
-        BClient.standalone = false
-    elseif GetResourceState(LAPTOP) == 'started' then
+-- close the laptop for the player (this app has no NUI focus of its own — the
+-- laptop owns focus since we're always an iframe inside it)
+local function closeUiForWorld()
+    if GetResourceState(LAPTOP) == 'started' then
         pcall(function() exports[LAPTOP]:Close() end)
     end
+end
+
+RegisterNUICallback('close', function(_, cb)
+    cb({ ok = true })
+    closeUiForWorld()
 end)
 
 -- start the world phase for the currently assigned contract
 RegisterNUICallback('startContract', function(_, cb)
     cb({ ok = true })
-    -- close whichever UI is showing this app
-    if BClient.standalone then
-        SetNuiFocus(false, false)
-        BClient.standalone = false
-    elseif GetResourceState(LAPTOP) == 'started' then
-        pcall(function() exports[LAPTOP]:Close() end)
-    end
+    closeUiForWorld()
     if BClient.contract then
         BClient.BeginWorldPhase(BClient.contract)
     end
 end)
-
--- close the current UI (shared by the tracker-disable + start flows)
-local function closeUiForWorld()
-    if BClient.standalone then
-        SetNuiFocus(false, false)
-        BClient.standalone = false
-    elseif GetResourceState(LAPTOP) == 'started' then
-        pcall(function() exports[LAPTOP]:Close() end)
-    end
-end
 
 -- Disable the GPS tracker. The button is only shown to eligible players, but
 -- the SERVER re-checks eligibility — this just runs the minigame and reports.
@@ -138,18 +123,6 @@ RegisterNUICallback('disableTracker', function(_, cb)
         Bridge.Framework.client.Notify('Tracker breach failed.', 'error')
     end
 end)
-
--- ── Standalone open (/boosting) ─────────────────────────────────────────────
-
-local function openStandalone()
-    BClient.standalone = true
-    SetNuiFocus(true, true)
-    SendNUIMessage({ action = 'boosting:show', standalone = true })
-end
-
-if Config.Command then
-    RegisterCommand(Config.Command, function() openStandalone() end, false)
-end
 
 -- Accept/decline a crew invite without opening the app (handy when invited
 -- mid-activity). The server rejects these if there's no live invite.
@@ -259,6 +232,12 @@ RegisterNetEvent('boosting:contractEnded', function(info)
     SendNUIMessage({ action = 'boosting:contractEnded', data = info })
 end)
 
+-- search-zone reveal: fired to the whole crew once ANYONE gets close enough
+-- (see contract.lua's startSearchLoop / BClient.OnRevealed)
+RegisterNetEvent('boosting:contractRevealed', function(data)
+    if BClient.OnRevealed then BClient.OnRevealed(data) end
+end)
+
 RegisterNetEvent('boosting:groupUpdate', function()
     SendNUIMessage({ action = 'boosting:groupUpdate' })
 end)
@@ -355,6 +334,5 @@ end)
 
 AddEventHandler('onResourceStop', function(res)
     if res ~= GetCurrentResourceName() then return end
-    if BClient.standalone then SetNuiFocus(false, false) end
     BClient.EndWorldPhase('resource_stop')
 end)

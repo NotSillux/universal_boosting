@@ -168,6 +168,9 @@ RegisterCallback('boot', function(src, session)
         activeContract = Contracts.GetActivePayload(src, session),
         queued = Queue.IsQueued(src),
         currencyLabel = Config.Currency.label,
+        -- controls whether the NUI shows the Admin tab; every actual admin
+        -- action is re-validated server-side regardless (see server/admin.lua)
+        isAdmin = Admin.IsAllowed(src),
         config = {
             vinScratchReward = Config.Contract.vinScratchReward,
             maxGroupSize = Config.Groups.maxSize,
@@ -175,6 +178,11 @@ RegisterCallback('boot', function(src, session)
             hackerXpPerLevel = Config.Progression.hackerXpPerLevel,
             driverXpPerLevel = Config.Progression.driverXpPerLevel,
             trackerRule = Config.Tracker.crewRule or 'non_leader',
+            payoutMode = Config.Groups.payoutMode,
+            leaderBonus = Config.Groups.leaderBonus,
+            fullCrewBonus = Config.Groups.fullCrewBonus,
+            searchZoneEnabled = Config.Contract.searchZone and Config.Contract.searchZone.enabled or false,
+            damageEnabled = Config.Damage.enabled,
         },
     }
 end)
@@ -217,7 +225,9 @@ CreateThread(function()
     if tries < 60 then
         print('^2[boosting]^0 registered with the ^3'..Config.LaptopResource..'^0 App Store')
     else
-        print('^3[boosting]^0 laptop resource not found — running standalone (/'..(Config.Command or 'boosting')..')')
+        -- boosting is laptop-exclusive (see fxmanifest.lua) — without the
+        -- laptop resource running, players have no way to open this app at all
+        print('^1[boosting]^0 laptop resource "'..Config.LaptopResource..'" not found — the Boosting App is unreachable until it starts')
     end
 end)
 

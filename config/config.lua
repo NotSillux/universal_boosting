@@ -9,7 +9,12 @@ Config.Inventory = 'auto'    -- 'auto' | 'ox' | 'qb'
 Config.Debug     = false
 
 Config.LaptopResource = 'laptop'   -- folder name of the NexOS laptop resource
-Config.Command        = 'boosting' -- opens the app standalone (false to disable)
+
+-- The Boosting App is LAPTOP-EXCLUSIVE: there is no standalone/tablet mode.
+-- It can only be opened from the laptop's desktop or App Store (client/main.lua
+-- registers it via exports[Laptop]:RegisterApp, and no ui_page / open command
+-- exists outside of that — see fxmanifest.lua). This is intentional; do not
+-- re-add a standalone command unless you also re-add `ui_page` in the manifest.
 
 -- ═══════════════════════════════════════════════════════════════════════════
 --  APP STORE LISTING  (how it appears inside the laptop)
@@ -128,12 +133,7 @@ Config.Contract = {
     -- where target vehicles spawn. The system picks the nearest few to the
     -- player and assigns one. Add as many as you like.
     spawnPoints = {
-        vec4(-47.8, -1094.8, 26.4, 160.0),
-        vec4(122.5, -1088.5, 29.2, 200.0),
-        vec4(-337.9, -1048.5, 30.3, 25.0),
-        vec4(795.4, -2998.9, 5.9, 90.0),
-        vec4(-1160.8, -1425.6, 4.4, 215.0),
-        vec4(1140.6, -770.2, 57.5, 95.0),
+        vec4(63.9963, 17.3924, 69.2356, 345.3546),
     },
 
     -- clean delivery drop-offs (Normal Delivery)
@@ -153,6 +153,23 @@ Config.Contract = {
     vinScratchReward = 1.9,    -- reward multiplier vs. clean delivery
     vinScratchGame   = 'timing',
     vinScratchDiff   = 3,
+
+    -- ── Search zone ──────────────────────────────────────────────────────────
+    -- Instead of a pinpoint blip, players get a circular search area and must
+    -- physically locate the vehicle. The exact blip only appears (and the
+    -- vehicle only spawns) once the player gets within `revealDistance` of the
+    -- REAL location — which the server never sends to the client until then.
+    searchZone = {
+        enabled        = true,
+        revealDistance = 40.0,  -- metres from the real spot before it's pinpointed
+        jitter         = 25.0,  -- metres the zone CENTER is randomised off the real spot (0 = centered exactly on it)
+        pollInterval   = 3,     -- seconds between search position pings sent to the server
+        -- search-zone radius per tier (bigger for rarer/harder cars)
+        radiusByTier = {
+            ['D'] = 150.0, ['C'] = 180.0, ['B'] = 220.0,
+            ['A'] = 260.0, ['S'] = 300.0, ['S+'] = 350.0,
+        },
+    },
 }
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -201,6 +218,52 @@ Config.Tracker = {
 
     -- The moving map blip cops & crew see for the tracked vehicle
     blip = { sprite = 326, colour = 5, scale = 1.0 },
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  NPC GUARDS
+--  Purely a client-side world-population feature (no server round-trip needed
+--  — every client already has full Config access). Guards spawn near the
+--  target vehicle during the theft phase; the player can fight or sneak past.
+--  They despawn once the tracker is hacked (car obtained) or the job ends.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+Config.Npcs = {
+    enabled          = true,
+    spawnRadius      = 8.0,    -- metres around the vehicle where guards appear
+    despawnOnPhaseEnd = true,
+    -- ped models to pick from (mix in your own — anything valid works)
+    models = { 's_m_y_blackops_01', 's_m_y_blackops_02', 'g_m_importexport_01', 'g_m_importexport_02' },
+
+    -- count / weapon / difficulty per contract tier
+    perTier = {
+        ['D']  = { count = 1, weapon = 'WEAPON_PISTOL',        health = 100, armor = 0,   accuracy = 25 },
+        ['C']  = { count = 2, weapon = 'WEAPON_PISTOL',        health = 120, armor = 0,   accuracy = 35 },
+        ['B']  = { count = 2, weapon = 'WEAPON_MICROSMG',      health = 150, armor = 25,  accuracy = 45 },
+        ['A']  = { count = 3, weapon = 'WEAPON_SMG',           health = 180, armor = 50,  accuracy = 55 },
+        ['S']  = { count = 3, weapon = 'WEAPON_CARBINERIFLE',  health = 220, armor = 75,  accuracy = 65 },
+        ['S+'] = { count = 4, weapon = 'WEAPON_CARBINERIFLE',  health = 260, armor = 100, accuracy = 75 },
+    },
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  VEHICLE CONDITION / DAMAGE PAYOUT
+--  The final payout is scaled by the vehicle's condition at delivery time
+--  (average of body health + engine health). Computed and enforced SERVER-side
+--  from the networked vehicle entity — the client only shows a live estimate.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+Config.Damage = {
+    enabled = true,
+    minPayoutMultiplier = 0.35,  -- floor: a wrecked car still pays at least this fraction
+    -- condition% -> payout multiplier. Evaluated top-down; first match wins.
+    tiers = {
+        { minCondition = 90, multiplier = 1.00 },  -- pristine / lightly scuffed
+        { minCondition = 75, multiplier = 0.90 },
+        { minCondition = 50, multiplier = 0.75 },
+        { minCondition = 25, multiplier = 0.55 },
+        { minCondition = 0,  multiplier = 0.35 },  -- wrecked
+    },
 }
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -314,11 +377,26 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════
 
 Config.Groups = {
-    maxSize        = 4,
-    rewardSplit    = 'equal',  -- 'equal' | 'leader' (leader takes all, splits manually)
-    shareXp        = true,     -- crew members all gain XP on completion
-    memberRewardMult = 0.6,    -- non-driver members get this fraction of the reward each
-    inviteExpiry   = 180,      -- seconds a crew invite stays acceptable
+    maxSize      = 4,
+    inviteExpiry = 180,   -- seconds a crew invite stays acceptable
+    shareXp      = true,  -- crew members all gain XP on completion
+
+    -- ── Payout distribution ──────────────────────────────────────────────────
+    -- payoutMode:
+    --   'equal'        : the reward is split evenly across all online crew
+    --                    members — nobody gets more just for being the leader.
+    --   'leader_bonus' : same even split, but the leader's cut is topped up by
+    --                    `leaderBonus` — funded ON TOP of the pool, not taken
+    --                    out of the other members' shares.
+    payoutMode  = 'equal',
+    leaderBonus = 0.15,   -- 'leader_bonus' mode: extra fraction of the total reward added to the leader's share
+
+    -- Extra reward for the WHOLE crew if everyone shows up together at the
+    -- final step (all online members within `fullCrewRadius` of the delivery
+    -- / VIN point when the job completes). Rewards genuine teamwork instead of
+    -- one driver doing everything while AFK crewmates still collect a cut.
+    fullCrewBonus  = 0.20,  -- fraction of the base reward, split evenly among the whole crew
+    fullCrewRadius = 15.0,  -- metres from the delivery/VIN point everyone must be within
 }
 
 -- ═══════════════════════════════════════════════════════════════════════════

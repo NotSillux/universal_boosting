@@ -34,3 +34,15 @@ function Utils.Round(n) return math.floor(n + 0.5) end
 function Utils.Dist(a, b)
     return math.sqrt((a.x - b.x)^2 + (a.y - b.y)^2 + (a.z - b.z)^2)
 end
+
+--- Vehicle-condition -> payout-multiplier lookup (Config.Damage.tiers).
+--- Shared so the client can compute the exact same estimate the server will
+--- use for the real payout (see server/contracts.lua and client/contract.lua).
+---@param conditionPct number 0..100 (average of body + engine health %)
+function Utils.VehicleConditionMultiplier(conditionPct)
+    if not Config.Damage or not Config.Damage.enabled then return 1.0 end
+    for _, t in ipairs(Config.Damage.tiers) do
+        if conditionPct >= t.minCondition then return t.multiplier end
+    end
+    return Config.Damage.minPayoutMultiplier or 0.35
+end

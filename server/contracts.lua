@@ -2,7 +2,8 @@
     Contract lifecycle — fully server-authoritative state machine.
 
     States:
-      assigned  -> a target has been located; player must reach it & hack it
+      assigned  -> a search zone (or target, if search zones are disabled) has
+                   been issued; player must locate & hack the vehicle
       stolen    -> tracker hacked, car is theirs; must escape the police
       escaped   -> police lost / distance cleared; may deliver or scratch VIN
       completed -> delivered or VIN-scratched, paid out
@@ -38,6 +39,23 @@ local function nearestSpawn(coords)
     return pick.sp
 end
 
+--- Build a search-zone circle around the real spawn point. The center may be
+--- jittered away from the real spot for extra obfuscation (Config.Contract
+--- .searchZone.jitter); the real spot is NEVER sent to the client until the
+--- player proves (via contract:searchPing) that they're within revealDistance.
+local function makeZone(spawn, tierKey)
+    local sz = Config.Contract.searchZone
+    local cx, cy = spawn.x, spawn.y
+    if sz.jitter and sz.jitter > 0 then
+        local angle = math.random() * 2 * math.pi
+        local dist = math.random() * sz.jitter
+        cx = cx + math.cos(angle) * dist
+        cy = cy + math.sin(angle) * dist
+    end
+    local radius = (sz.radiusByTier and sz.radiusByTier[tierKey]) or 200.0
+    return { x = cx, y = cy, z = spawn.z, radius = radius }
+end
+
 --- Create and register a contract for the player. Returns the contract or nil.
 function Contracts.Assign(src, session)
     if Contracts.active[src] then return nil end
@@ -50,6 +68,7 @@ function Contracts.Assign(src, session)
     local model = tier.vehicles[math.random(#tier.vehicles)]
     local spawn = nearestSpawn(playerCoords(src))
     local reward = tier.reward
+    local szEnabled = Config.Contract.searchZone and Config.Contract.searchZone.enabled
 
     local contract = {
         id = Utils.Id('ctr_'),
@@ -66,7 +85,9 @@ function Contracts.Assign(src, session)
         difficulty = tier.difficulty,
         police = tier.police,
         state = 'assigned',
-        spawn = spawn,
+        spawn = spawn,               -- REAL location — never sent to the client until revealed
+        zone = makeZone(spawn, tierKey),
+        revealed = not szEnabled,    -- search zones off -> behave like the old exact-blip flow
         createdAt = os.time(),
     }
     Contracts.active[src] = contract
@@ -84,13 +105,21 @@ function Contracts.Assign(src, session)
         hackGame = tier.hackGame,
         difficulty = tier.difficulty,
         police = tier.police,
-        spawn = { x = spawn.x, y = spawn.y, z = spawn.z, w = spawn.w },
         deliveryPoints = Config.Contract.deliveryPoints,
         vinPoints = Config.Contract.vinScratchPoints,
         deliveryRadius = Config.Contract.deliveryRadius,
         vinRadius = Config.Contract.vinScratchRadius,
         vinMultiplier = Config.Contract.vinScratchReward,
     }
+    if contract.revealed then
+        contract.clientPayload.spawn = { x = spawn.x, y = spawn.y, z = spawn.z, w = spawn.w }
+        contract.clientPayload.searchZone = false
+    else
+        contract.clientPayload.spawn = false
+        contract.clientPayload.searchZone = { x = contract.zone.x, y = contract.zone.y,
+            z = contract.zone.z, radius = contract.zone.radius }
+    end
+
     Utils.Debug(('assigned %s (%s %s) to %s'):format(contract.id, tierKey, model, src))
     return contract
 end
@@ -111,7 +140,7 @@ function Contracts.ResolveForPlayer(src)
 end
 
 --- May this player disable the contract's GPS tracker?
---- Solo → the owner. Crew → the leader or the assigned Hacker.
+--- Solo → the owner. Crew → governed by Config.Tracker.crewRule.
 function Contracts.CanDisable(src, c)
     if c.groupId then return Groups.CanDisableTracker(src, c.groupId) end
     return src == c.ownerSrc
@@ -137,18 +166,36 @@ local function trackerPayload(c, src)
     }
 end
 
---- Payload for the UI (never exposes tokens). Works for the owner AND crew.
+--- Payload for the UI (never exposes tokens or the un-revealed real spawn).
+--- Works for the owner AND crew members tagging along.
 function Contracts.GetActivePayload(src, session)
     local c, isOwner = Contracts.ResolveForPlayer(src)
     if not c then return false end
-    return {
+
+    local payload = {
         id = c.id, tier = c.tier, tierLabel = c.tierLabel, color = c.color,
         model = c.model, reward = c.reward, state = c.state, police = c.police,
-        spawn = { x = c.spawn.x, y = c.spawn.y, z = c.spawn.z, w = c.spawn.w },
         vinMultiplier = Config.Contract.vinScratchReward,
         isOwner = isOwner,
         tracker = trackerPayload(c, src),
     }
+    if c.revealed or c.state ~= 'assigned' then
+        payload.spawn = { x = c.spawn.x, y = c.spawn.y, z = c.spawn.z, w = c.spawn.w }
+        payload.searchZone = false
+    else
+        payload.spawn = false
+        payload.searchZone = { x = c.zone.x, y = c.zone.y, z = c.zone.z, radius = c.zone.radius }
+    end
+    return payload
+end
+
+--- Everyone tied to a contract: the owner + their crew (or just the owner).
+local function contractAudience(c)
+    if c.groupId then
+        local m = Groups.Members(c.groupId)
+        if #m > 0 then return m end
+    end
+    return { c.ownerSrc }
 end
 
 local function history(identifier, tier, model, outcome, reward)
@@ -165,32 +212,70 @@ local function clearActive(src)
     Contracts.active[src] = nil
 end
 
+--- Force-end a contract from any code path (admin panel, /boostadmin, a
+--- player disconnecting mid-run). Tears down the tracker blip for police/crew
+--- and clears the queue entry so the slot isn't stuck. Returns true if there
+--- was an active contract to end.
+function Contracts.ForceEnd(src, reason)
+    local c = Contracts.active[src]
+    if not c then return false end
+    Contracts.StopTracker(c, reason or 'admin')
+    setState(c, reason or 'failed')
+    Contracts.active[src] = nil
+    if Queue and Queue.Remove then Queue.Remove(src) end
+    TriggerClientEvent('boosting:contractEnded', src, { reason = reason or 'admin' })
+    return true
+end
+
 -- ── Reward payout (handles crews) ───────────────────────────────────────────
 
-local function payout(src, session, contract, grossReward)
+--- True when every member of `members` is online AND within `radius` of
+--- `point` — used for the full-crew participation bonus (Config.Groups
+--- .fullCrewBonus). Solo jobs never qualify (there's no "team" to reward).
+local function fullCrewPresent(members, point, radius)
+    if #members <= 1 or not point then return false end
+    for _, m in ipairs(members) do
+        local pc = playerCoords(m)
+        if not pc or #(pc - point) > radius then return false end
+    end
+    return true
+end
+
+--- Compute and pay out shares for a completed contract.
+--- `deliveryPoint` is the actual vec3 the player delivered/scratched at — used
+--- only to check full-crew participation; may be nil (no bonus in that case).
+local function payout(src, session, contract, grossReward, deliveryPoint)
     grossReward = Utils.Round(grossReward)
-    local members = { src }
-    if contract.groupId then
-        local m = Groups.Members(contract.groupId)
-        if #m > 0 then members = m end
+    local members = contractAudience(contract)
+    local n = #members
+
+    -- base: split evenly across every online crew member (or the full amount
+    -- if solo)
+    local baseShare = Utils.Round(grossReward / n)
+    local shares = {}
+    for _, m in ipairs(members) do shares[m] = baseShare end
+
+    -- leader bonus: funded ON TOP of the pool, doesn't reduce anyone else's cut
+    if n > 1 and Config.Groups.payoutMode == 'leader_bonus' and contract.groupId then
+        local g = Groups.groups[contract.groupId]
+        if g and g.leader and shares[g.leader] then
+            shares[g.leader] = shares[g.leader] + Utils.Round(grossReward * (Config.Groups.leaderBonus or 0))
+        end
     end
 
-    if #members > 1 and Config.Groups.rewardSplit == 'equal' then
-        local share = Utils.Round(grossReward / #members)
-        for _, member in ipairs(members) do
-            Bridge.PayReward(member, share)
-            Bridge.Framework.server.Notify(member, ('Crew payout: %d %s'):format(share, Config.Currency.label), 'success')
-        end
-    else
-        Bridge.PayReward(src, grossReward)
-        Bridge.Framework.server.Notify(src, ('Payout: %d %s'):format(grossReward, Config.Currency.label), 'success')
-        for _, member in ipairs(members) do
-            if member ~= src then
-                local share = Utils.Round(grossReward * Config.Groups.memberRewardMult)
-                Bridge.PayReward(member, share)
-                Bridge.Framework.server.Notify(member, ('Crew cut: %d %s'):format(share, Config.Currency.label), 'success')
-            end
-        end
+    -- full-crew participation bonus: everyone showed up together at the end
+    local fullCrew = fullCrewPresent(members, deliveryPoint, Config.Groups.fullCrewRadius or 15.0)
+    if fullCrew then
+        local bonusEach = Utils.Round((grossReward * (Config.Groups.fullCrewBonus or 0)) / n)
+        for _, m in ipairs(members) do shares[m] = shares[m] + bonusEach end
+    end
+
+    for _, m in ipairs(members) do
+        local share = shares[m] or baseShare
+        Bridge.PayReward(m, share)
+        local label = (m == src) and 'Payout' or 'Crew payout'
+        Bridge.Framework.server.Notify(m, ('%s: %d %s%s'):format(
+            label, share, Config.Currency.label, fullCrew and ' (+full crew bonus)' or ''), 'success')
     end
 
     -- XP: driver/owner always; crew shares if configured
@@ -200,10 +285,55 @@ local function payout(src, session, contract, grossReward)
             if ms then Boost.GrantXp(member, ms, contract.xp) end
         end
     end
-    Boost.RecordCompletion(src, session, grossReward)
+    -- record the ACTUAL amount paid to the acting player, not the gross pool
+    Boost.RecordCompletion(src, session, shares[src] or baseShare)
+end
+
+-- ── Vehicle condition (damage-based payout scaling) ─────────────────────────
+
+--- Average body/engine health of a networked vehicle, as a 0-100 percentage.
+--- `refCoords`, if given, sanity-checks the entity is actually near the
+--- reporting player (defends against a spoofed/stale net id).
+local function vehicleCondition(netId, refCoords)
+    if not Config.Damage.enabled then return 100 end
+    if type(netId) ~= 'number' then return 100 end
+    local ent = NetworkGetEntityFromNetworkId(netId)
+    if ent == 0 or not DoesEntityExist(ent) or GetEntityType(ent) ~= 2 then return 100 end
+    if refCoords and #(GetEntityCoords(ent) - refCoords) > 30.0 then return 100 end
+
+    local body = GetEntityHealth(ent)          -- 0..1000 (default vehicle max)
+    local engine = GetVehicleEngineHealth(ent) -- can go negative when destroyed; 1000 = perfect
+    local bodyPct = math.max(0, math.min(100, (body / 1000) * 100))
+    local enginePct = math.max(0, math.min(100, (engine / 1000) * 100))
+    return (bodyPct + enginePct) / 2
 end
 
 -- ── Callbacks (state transitions) ───────────────────────────────────────────
+
+--- Player reports they've searched close enough to the real vehicle location.
+--- The server is the only one who ever knows the real spot before this point.
+RegisterCallback('contract:searchPing', function(src, session, data)
+    local c = Contracts.ResolveForPlayer(src)
+    if not c or c.state ~= 'assigned' then return { error = 'no_contract' } end
+
+    if c.revealed then
+        return { ok = true, revealed = true, spawn = { x = c.spawn.x, y = c.spawn.y, z = c.spawn.z, w = c.spawn.w } }
+    end
+    if type(data.x) ~= 'number' or type(data.y) ~= 'number' or type(data.z) ~= 'number' then
+        return { error = 'bad_request' }
+    end
+
+    local dist = #(vec3(data.x, data.y, data.z) - vec3(c.spawn.x, c.spawn.y, c.spawn.z))
+    if dist <= (Config.Contract.searchZone.revealDistance or 40.0) then
+        c.revealed = true
+        local spawnPayload = { x = c.spawn.x, y = c.spawn.y, z = c.spawn.z, w = c.spawn.w }
+        for _, t in ipairs(contractAudience(c)) do
+            TriggerClientEvent('boosting:contractRevealed', t, { spawn = spawnPayload })
+        end
+        return { ok = true, revealed = true, spawn = spawnPayload }
+    end
+    return { ok = true, revealed = false, distance = Utils.Round(dist) }
+end)
 
 --- Player has reached the target and finished the tracker minigame.
 RegisterCallback('contract:hackResult', function(src, session, data)
@@ -366,7 +496,7 @@ RegisterNetEvent('boosting:trackerPing', function(data)
 end)
 
 --- Disable the tracker (mandatory step). Eligibility is enforced here, not on
---- the client: solo owner, or crew leader / assigned Hacker.
+--- the client: solo owner, or governed by Config.Tracker.crewRule.
 RegisterCallback('tracker:disable', function(src, session, data)
     local c = Contracts.ResolveForPlayer(src)
     if not c or not c.tracker or not c.tracker.active then return { error = 'no_tracker' } end
@@ -387,9 +517,7 @@ RegisterCallback('tracker:disable', function(src, session, data)
     Contracts.StopTracker(c, 'disabled')
 
     -- tell crew + police it went dark
-    local audience = { c.ownerSrc }
-    if c.groupId then audience = Groups.Members(c.groupId) end
-    for _, m in ipairs(audience) do
+    for _, m in ipairs(contractAudience(c)) do
         TriggerClientEvent('boosting:notify', m, { title = 'GPS Tracker', text = 'Tracker disabled — you\'re off the grid.' })
     end
     for _, cop in ipairs(Contracts.OnDutyPolice()) do
@@ -439,29 +567,37 @@ local function trackerBlocks(c)
     return Config.Tracker.blockDelivery and c.tracker and c.tracker.required and not c.tracker.disabled
 end
 
---- Clean delivery — validate the player is at a drop-off, pay base reward.
-RegisterCallback('contract:deliver', function(src, session)
+--- Clean delivery — validate the player is at a drop-off, scale the reward by
+--- vehicle condition, pay out.
+RegisterCallback('contract:deliver', function(src, session, data)
     local c = Contracts.active[src]
     if not c or c.state ~= 'escaped' then return { error = 'not_ready' } end
     if trackerBlocks(c) then return { error = 'tracker_active' } end
 
     local coords = playerCoords(src)
     if not coords then return { error = 'no_ped' } end
-    local atPoint = false
+    local atPoint, matchedPoint = false, nil
     for _, p in ipairs(Config.Contract.deliveryPoints) do
-        if #(coords - p) <= Config.Contract.deliveryRadius + 6.0 then atPoint = true break end
+        if #(coords - p) <= Config.Contract.deliveryRadius + 6.0 then atPoint = true; matchedPoint = p; break end
     end
     if not atPoint then return { error = 'not_at_dropoff' } end
 
+    -- damage-based payout scaling (Config.Damage) — computed from the real,
+    -- server-resolved vehicle entity, never trusted from the client
+    local condition = vehicleCondition(data.netId, coords)
+    local multiplier = Utils.VehicleConditionMultiplier(condition)
+    local finalReward = Utils.Round(c.reward * multiplier)
+
     setState(c, 'completed')
     Contracts.StopTracker(c, 'delivered')
-    payout(src, session, c, c.reward)
-    history(session.identifier, c.tier, c.model, 'delivered', c.reward)
+    payout(src, session, c, finalReward, matchedPoint)
+    history(session.identifier, c.tier, c.model, 'delivered', finalReward)
     clearActive(src)
-    return { ok = true, reward = c.reward }
+    return { ok = true, reward = finalReward, condition = Utils.Round(condition), multiplier = multiplier }
 end)
 
---- VIN scratch — validate location, higher reward, keep the vehicle.
+--- VIN scratch — validate location, apply damage scaling, higher reward, keep
+--- the vehicle.
 RegisterCallback('contract:vin', function(src, session, data)
     local c = Contracts.active[src]
     if not c or c.state ~= 'escaped' then return { error = 'not_ready' } end
@@ -470,16 +606,19 @@ RegisterCallback('contract:vin', function(src, session, data)
 
     local coords = playerCoords(src)
     if not coords then return { error = 'no_ped' } end
-    local atPoint = false
+    local atPoint, matchedPoint = false, nil
     for _, p in ipairs(Config.Contract.vinScratchPoints) do
-        if #(coords - p) <= Config.Contract.vinScratchRadius + 6.0 then atPoint = true break end
+        if #(coords - p) <= Config.Contract.vinScratchRadius + 6.0 then atPoint = true; matchedPoint = p; break end
     end
     if not atPoint then return { error = 'not_at_garage' } end
 
-    local reward = c.reward * Config.Contract.vinScratchReward
+    local condition = vehicleCondition(data.netId, coords)
+    local condMultiplier = Utils.VehicleConditionMultiplier(condition)
+    local reward = c.reward * Config.Contract.vinScratchReward * condMultiplier
+
     setState(c, 'completed')
     Contracts.StopTracker(c, 'vin')
-    payout(src, session, c, reward)
+    payout(src, session, c, reward, matchedPoint)
     history(session.identifier, c.tier, c.model, 'vin_scratched', Utils.Round(reward))
 
     -- ── clean identity: fresh plate + garage registration + keys ──────────
@@ -520,7 +659,8 @@ RegisterCallback('contract:vin', function(src, session, data)
 
     clearActive(src)
     return { ok = true, reward = Utils.Round(reward), kept = true,
-             newPlate = newPlate, garaged = garaged }
+             newPlate = newPlate, garaged = garaged,
+             condition = Utils.Round(condition), multiplier = condMultiplier }
 end)
 
 RegisterCallback('contract:abandon', function(src, session)
@@ -545,10 +685,5 @@ end)
 -- Contracts are single-life: dropping mid-run fails the job.
 AddEventHandler('playerDropped', function()
     local src = source
-    local c = Contracts.active[src]
-    if c and c.state ~= 'completed' then
-        Contracts.StopTracker(c, 'failed')  -- clear the blip for police/crew
-        setState(c, 'failed')
-        Contracts.active[src] = nil
-    end
+    Contracts.ForceEnd(src, 'failed')
 end)
